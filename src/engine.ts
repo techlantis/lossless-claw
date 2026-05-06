@@ -2332,6 +2332,36 @@ export class LcmContextEngine implements ContextEngine {
       && this.isPromptCacheStillHot(telemetry, now);
   }
 
+  /** Let already-recorded cold-cache debt drain even when the last cache touch is recent. */
+  private shouldBypassDeferredCompactionHotCacheDelay(params: {
+    telemetry: ConversationCompactionTelemetryRecord | null;
+    debtReason?: string | null;
+  }): boolean {
+    if (params.debtReason?.trim() === "cold-cache-catchup") {
+      return true;
+    }
+    return this.isObservedCacheReadShareCold(params.telemetry);
+  }
+
+  /** Apply the prompt-cache delay policy with the recorded deferred-debt reason in scope. */
+  private shouldDelayDeferredCompactionDebt(params: {
+    telemetry: ConversationCompactionTelemetryRecord | null;
+    now?: Date;
+    currentTokenCount?: number;
+    tokenBudget?: number;
+    debtReason?: string | null;
+  }): boolean {
+    if (this.shouldBypassDeferredCompactionHotCacheDelay(params)) {
+      return false;
+    }
+    return this.shouldDelayPromptMutatingDeferredCompaction(
+      params.telemetry,
+      params.now ?? new Date(),
+      params.currentTokenCount,
+      params.tokenBudget,
+    );
+  }
+
   /**
    * Return true when the live prompt is critically full relative to the
    * token budget. Used to bypass cache-aware deferral so compaction can fire
@@ -3073,12 +3103,13 @@ export class LcmContextEngine implements ContextEngine {
         // execution would consider critical.
         const cappedTokenBudget = this.applyAssemblyBudgetCap(params.tokenBudget);
         if (
-          this.shouldDelayPromptMutatingDeferredCompaction(
+          this.shouldDelayDeferredCompactionDebt({
             telemetry,
-            new Date(),
-            params.currentTokenCount,
-            cappedTokenBudget,
-          )
+            now: new Date(),
+            currentTokenCount: params.currentTokenCount,
+            tokenBudget: cappedTokenBudget,
+            debtReason: maintenance.reason ?? params.reason,
+          })
         ) {
           this.deps.log.info(
             `[lcm] background deferred compaction skipped conversation=${params.conversationId} ${sessionLabel} reason=hot-cache retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"} debtReason=${maintenance.reason ?? params.reason}`,
@@ -3297,12 +3328,13 @@ export class LcmContextEngine implements ContextEngine {
           (normalizedCurrentTokenCount ?? 0) > cappedTokenBudget;
         if (
           promptOverflowEmergency
-          || !this.shouldDelayPromptMutatingDeferredCompaction(
+          || !this.shouldDelayDeferredCompactionDebt({
             telemetry,
-            new Date(),
-            normalizedCurrentTokenCount,
-            cappedTokenBudget,
-          )
+            now: new Date(),
+            currentTokenCount: normalizedCurrentTokenCount,
+            tokenBudget: cappedTokenBudget,
+            debtReason: maintenance.reason,
+          })
         ) {
           const deferredLegacyParams =
             telemetry?.provider || telemetry?.model
@@ -5749,12 +5781,13 @@ export class LcmContextEngine implements ContextEngine {
               ? Math.floor(params.runtimeContext.currentTokenCount as number)
               : undefined;
           if ((maintenance?.pending || maintenance?.running)
-            && this.shouldDelayPromptMutatingDeferredCompaction(
+            && this.shouldDelayDeferredCompactionDebt({
               telemetry,
-              new Date(),
-              maintainCurrentTokenCount,
-              cappedTokenBudget,
-            )) {
+              now: new Date(),
+              currentTokenCount: maintainCurrentTokenCount,
+              tokenBudget: cappedTokenBudget,
+              debtReason: maintenance.reason,
+            })) {
             this.deps.log.info(
               `[lcm] maintain: deferred compaction debt still hot-cache deferred conversation=${conversation.conversationId} ${sessionLabel} retention=${telemetry?.retention ?? "null"} lastCacheTouchAt=${telemetry?.lastCacheTouchAt?.toISOString() ?? "null"}`,
             );
