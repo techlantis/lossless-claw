@@ -87,6 +87,10 @@ import {
   resolveSessionQueueKey,
   type SessionOperationQueues,
 } from "./engine/session-operation-queue.js";
+import {
+  batchLooksLikeHeartbeatAckTurn,
+  pruneHeartbeatOkTurns,
+} from "./engine/heartbeat-pruning.js";
 import { createLcmDatabaseBackup } from "./plugin/lcm-db-backup.js";
 import {
   DatabaseTransactionTimeoutError,
@@ -4542,7 +4546,7 @@ export class LcmContextEngine implements ContextEngine {
             // Prune HEARTBEAT_OK turns from the freshly imported data
             let prunedMessages = 0;
             if (this.config.pruneHeartbeatOk) {
-              const pruned = await this.pruneHeartbeatOkTurns(conversationId);
+              const pruned = await pruneHeartbeatOkTurns(this.conversationStore, conversationId);
               prunedMessages = pruned;
               if (pruned > 0) {
                 this.clearStableOrphanStrippingOrdinal(conversationId);
@@ -4639,7 +4643,10 @@ export class LcmContextEngine implements ContextEngine {
           sessionKey: params.sessionKey,
         });
         if (conversation) {
-          const pruned = await this.pruneHeartbeatOkTurns(conversation.conversationId);
+          const pruned = await pruneHeartbeatOkTurns(
+            this.conversationStore,
+            conversation.conversationId,
+          );
           if (pruned > 0) {
             this.clearStableOrphanStrippingOrdinal(conversation.conversationId);
             await this.refreshBootstrapState({
@@ -5613,7 +5620,10 @@ export class LcmContextEngine implements ContextEngine {
           sessionKey: params.sessionKey,
         });
         if (conversation) {
-          const pruned = await this.pruneHeartbeatOkTurns(conversation.conversationId);
+          const pruned = await pruneHeartbeatOkTurns(
+            this.conversationStore,
+            conversation.conversationId,
+          );
           if (pruned > 0) {
             this.clearStableOrphanStrippingOrdinal(conversation.conversationId);
             const sessionContext = this.formatSessionLogContext({
@@ -7715,111 +7725,6 @@ export class LcmContextEngine implements ContextEngine {
     return this.compactionMaintenanceStore;
   }
 
-  // ── Heartbeat pruning ──────────────────────────────────────────────────
-
-  /**
-   * Detect HEARTBEAT_OK turn cycles in a conversation and delete them.
-   *
-   * A HEARTBEAT_OK turn is: a user message (the heartbeat prompt), followed by
-   * any tool call/result messages, ending with an assistant message that is a
-   * heartbeat ack. The entire sequence has no durable information value for LCM.
-   *
-   * Detection: assistant content (trimmed, lowercased) starts with "heartbeat_ok"
-   * and any text after is not alphanumeric (matches OpenClaw core's ack detection).
-   * This catches both exact "HEARTBEAT_OK" and chatty variants like
-   * "HEARTBEAT_OK — weekend, no market".
-   *
-   * Returns the number of messages deleted.
-   */
-  private async pruneHeartbeatOkTurns(conversationId: number): Promise<number> {
-    const allMessages = await this.conversationStore.getMessages(conversationId);
-    if (allMessages.length === 0) {
-      return 0;
-    }
-
-    const toDelete: number[] = [];
-
-    // Walk through messages finding HEARTBEAT_OK assistant replies, then
-    // collect the entire turn (back to the preceding user message).
-    for (let i = 0; i < allMessages.length; i++) {
-      const msg = allMessages[i];
-      if (msg.role !== "assistant") {
-        continue;
-      }
-      if (!isHeartbeatOkContent(msg.content)) {
-        continue;
-      }
-
-      // Found an exact HEARTBEAT_OK reply. Walk backward to find the turn start
-      // (the preceding user message).
-      const turnMessages = [msg];
-      for (let j = i - 1; j >= 0; j--) {
-        const prev = allMessages[j];
-        turnMessages.push(prev);
-        if (prev.role === "user") {
-          break; // Found turn start
-        }
-      }
-
-      if (!turnMessages.some((record) => record.role === "user")) {
-        continue;
-      }
-      if (!turnLooksLikeHeartbeatTurn(turnMessages)) {
-        continue;
-      }
-
-      toDelete.push(...turnMessages.map((record) => record.messageId));
-    }
-
-    if (toDelete.length === 0) {
-      return 0;
-    }
-
-    // Deduplicate (a message could theoretically appear in multiple turns)
-    const uniqueIds = [...new Set(toDelete)];
-    return this.conversationStore.deleteMessages(uniqueIds);
-  }
-}
-
-// ── Heartbeat detection ─────────────────────────────────────────────────────
-
-const HEARTBEAT_OK_TOKEN = "heartbeat_ok";
-const HEARTBEAT_TURN_MARKER = "heartbeat.md";
-
-/**
- * Detect whether an assistant message is a heartbeat ack.
- *
- * Only exact (case-insensitive) "HEARTBEAT_OK" acknowledgements are pruned.
- * Any additional text indicates the heartbeat carried real content and should remain.
- */
-function isHeartbeatOkContent(content: string): boolean {
-  return content.trim().toLowerCase() === HEARTBEAT_OK_TOKEN;
-}
-
-function batchLooksLikeHeartbeatAckTurn(messages: AgentMessage[]): boolean {
-  let sawHeartbeatMarker = false;
-  let sawHeartbeatAck = false;
-
-  for (const message of messages) {
-    const stored = toStoredMessage(message);
-    if (!sawHeartbeatMarker && stored.content.toLowerCase().includes(HEARTBEAT_TURN_MARKER)) {
-      sawHeartbeatMarker = true;
-    }
-    if (!sawHeartbeatAck && stored.role === "assistant" && isHeartbeatOkContent(stored.content)) {
-      sawHeartbeatAck = true;
-    }
-    if (sawHeartbeatMarker && sawHeartbeatAck) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function turnLooksLikeHeartbeatTurn(turnMessages: Array<{ content: string }>): boolean {
-  return turnMessages.some((message) =>
-    message.content.toLowerCase().includes(HEARTBEAT_TURN_MARKER),
-  );
 }
 
 // ── Emergency fallback summarization ────────────────────────────────────────
