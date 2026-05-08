@@ -82,6 +82,11 @@ import {
   toStoredMessage,
   type StoredMessage,
 } from "./engine/message-normalization.js";
+import {
+  SessionOperationQueue,
+  resolveSessionQueueKey,
+  type SessionOperationQueues,
+} from "./engine/session-operation-queue.js";
 import { createLcmDatabaseBackup } from "./plugin/lcm-db-backup.js";
 import {
   DatabaseTransactionTimeoutError,
@@ -1030,10 +1035,8 @@ export class LcmContextEngine implements ContextEngine {
   private readonly fts5Available: boolean;
   private readonly ignoreSessionPatterns: RegExp[];
   private readonly statelessSessionPatterns: RegExp[];
-  private sessionOperationQueues = new Map<
-    string,
-    { promise: Promise<void>; refCount: number }
-  >();
+  private readonly sessionQueue: SessionOperationQueue;
+  private readonly sessionOperationQueues: SessionOperationQueues;
   private previousAssembledMessagesByConversation = new Map<number, AssemblePrefixSnapshot>();
   private stableOrphanStrippingOrdinalsByConversation = new Map<number, number>();
   private recentBootstrapImportsByConversation = new Map<number, BootstrapImportObservation>();
@@ -1083,6 +1086,8 @@ export class LcmContextEngine implements ContextEngine {
     this.ignoreSessionPatterns = compileSessionPatterns(this.config.ignoreSessionPatterns);
     this.statelessSessionPatterns = compileSessionPatterns(this.config.statelessSessionPatterns);
     this.db = database;
+    this.sessionQueue = new SessionOperationQueue(this.deps.log);
+    this.sessionOperationQueues = this.sessionQueue.queues;
 
     // Run migrations eagerly at construction time so the schema exists
     // before any lifecycle hook fires.
@@ -1312,47 +1317,12 @@ export class LcmContextEngine implements ContextEngine {
     operation: () => Promise<T>,
     options?: { operationName?: string; context?: string },
   ): Promise<T> {
-    const entry = this.sessionOperationQueues.get(queueKey);
-    const previous = entry?.promise ?? Promise.resolve();
-    const queuedAhead = entry?.refCount ?? 0;
-    let releaseQueue: () => void = () => {};
-    const current = new Promise<void>((resolve) => {
-      releaseQueue = resolve;
-    });
-    const next = previous.catch(() => {}).then(() => current);
-
-    if (entry) {
-      entry.promise = next;
-      entry.refCount++;
-    } else {
-      this.sessionOperationQueues.set(queueKey, { promise: next, refCount: 1 });
-    }
-
-    const waitStartedAt = Date.now();
-    await previous.catch(() => {});
-    const waitMs = Date.now() - waitStartedAt;
-    if (options?.operationName) {
-      const detail = options.context ? ` ${options.context}` : "";
-      this.deps.log.debug(
-        `[lcm] ${options.operationName}: session queue acquired queueKey=${queueKey} queuedAhead=${queuedAhead} wait=${formatDurationMs(waitMs)}${detail}`,
-      );
-    }
-    try {
-      return await operation();
-    } finally {
-      releaseQueue();
-      const cur = this.sessionOperationQueues.get(queueKey);
-      if (cur && --cur.refCount === 0) {
-        this.sessionOperationQueues.delete(queueKey);
-      }
-    }
+    return this.sessionQueue.run(queueKey, operation, options);
   }
 
   /** Prefer stable session keys for queue serialization when available. */
   private resolveSessionQueueKey(sessionId?: string, sessionKey?: string): string {
-    const normalizedSessionKey = sessionKey?.trim();
-    const normalizedSessionId = sessionId?.trim();
-    return normalizedSessionKey || normalizedSessionId || "__lcm__";
+    return resolveSessionQueueKey(sessionId, sessionKey);
   }
 
   /** Normalize optional live token estimates supplied by runtime callers. */
