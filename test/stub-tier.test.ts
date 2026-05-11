@@ -15,7 +15,7 @@ const BLOB_MIGRATE_SCRIPT = fileURLToPath(
 );
 
 /**
- * v4.2 §B (Option C) — stub-tier stratification end-to-end behavior tests.
+ * Stub-tier stratification end-to-end behavior tests.
  *
  * Option C reuses the v4.1 `large_files` storage model:
  *  - `messages.large_content` stores the externalized `file_xxx` id
@@ -157,12 +157,12 @@ function bigPayload(prefix: string, kb: number): string {
 function setupDb(): { db: DatabaseSync; storageDir: string } {
   const db = new DatabaseSync(":memory:");
   runLcmMigrations(db, { fts5Available: false });
-  const storageDir = mkdtempSync(join(tmpdir(), "v42-stub-storage-"));
+  const storageDir = mkdtempSync(join(tmpdir(), "stub-tier-storage-"));
   return { db, storageDir };
 }
 
 function setupScriptDb(): { db: DatabaseSync; dbPath: string; storageDir: string; stateDir: string } {
-  const stateDir = mkdtempSync(join(tmpdir(), "v42-script-state-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "stub-tier-script-state-"));
   const storageDir = join(stateDir, "lcm-files");
   mkdirSync(storageDir, { recursive: true });
   const dbPath = join(stateDir, "lcm.db");
@@ -171,7 +171,7 @@ function setupScriptDb(): { db: DatabaseSync; dbPath: string; storageDir: string
   return { db, dbPath, storageDir, stateDir };
 }
 
-describe("v4.2 §B (Option C) stub-tier stratification", () => {
+describe("stub-tier stratification", () => {
   it("emits stubs only for evictable externalized tool messages", async () => {
     const { db, storageDir } = setupDb();
 
@@ -221,9 +221,8 @@ describe("v4.2 §B (Option C) stub-tier stratification", () => {
       })
       .filter((t) => t.includes("[LCM Tool Output:"));
     expect(stubTexts.length).toBeGreaterThan(0);
-    // Each stub references a file_xxx id and includes the v4.2 hint
-    // pointing at lcm_describe with expandFile=true (the path that
-    // actually returns content from disk).
+    // Each stub references a file_xxx id and points at lcm_describe with
+    // expandFile=true, the path that actually returns content from disk.
     for (const t of stubTexts) {
       expect(t).toMatch(/\[LCM Tool Output: file_/);
       expect(t).toContain("Call lcm_describe");
@@ -384,7 +383,7 @@ describe("v4.2 §B (Option C) stub-tier stratification", () => {
  * asserts the bytes match the original tool-result payload.
  */
 import { readFileSync } from "node:fs";
-describe("v4.2 §B (Option C) drilldown round-trip", () => {
+describe("stub-tier drilldown round-trip", () => {
   it("agent can recover the full payload via the file_xxx referenced in the stub", async () => {
     const { db, storageDir } = setupDb();
     const originalPayload = bigPayload("END-TO-END", 20);
@@ -482,7 +481,7 @@ describe("v4.2 §B (Option C) drilldown round-trip", () => {
   });
 });
 
-describe("v4.2 §B blob-migrate script", () => {
+describe("stub-tier blob-migrate script", () => {
   it("uses the runtime large-files root derived from OPENCLAW_STATE_DIR", () => {
     const { db, dbPath, stateDir } = setupScriptDb();
     db.close();
