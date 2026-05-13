@@ -50,6 +50,9 @@ When compaction creates a summary from a range of messages (or summaries), the s
 
 ## Compaction lifecycle
 
+For the detailed cache-aware policy that governs incremental and deferred
+compaction, see [Cache-Aware Compaction](./cache-aware-compaction.md).
+
 ### Ingestion
 
 When OpenClaw processes a turn, it calls the context engine's lifecycle hooks:
