@@ -41,6 +41,103 @@ func TestLoadSessionBatchIncludesEstimatedTokens(t *testing.T) {
 	}
 }
 
+func TestLoadSessionBatchIncludesCodexBackendMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "main")
+	sessionsDir := filepath.Join(agentDir, "sessions")
+	backendDir := filepath.Join(agentDir, "agent", "codex-home", "sessions", "2026", "05", "12")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("create sessions dir: %v", err)
+	}
+	if err := os.MkdirAll(backendDir, 0o755); err != nil {
+		t.Fatalf("create codex sessions dir: %v", err)
+	}
+
+	const threadID = "019e1cac-cdb8-7801-acf8-efc11c77d024"
+	path := filepath.Join(sessionsDir, "session-1.jsonl")
+	content := `{"type":"message","id":"1","message":{"role":"user","content":"hello"}}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	binding := `{"threadId":"` + threadID + `","model":"gpt-5.5"}`
+	if err := os.WriteFile(path+".codex-app-server.json", []byte(binding), 0o644); err != nil {
+		t.Fatalf("write codex binding: %v", err)
+	}
+	backendContent := `{"timestamp":"2026-05-12T14:52:29Z","type":"event_msg","payload":{"type":"agent_message","message":"hello from codex"}}` + "\n" +
+		`{"timestamp":"2026-05-12T14:52:30Z","type":"event_msg","payload":{"type":"task_complete"}}` + "\n"
+	backendPath := filepath.Join(backendDir, "rollout-2026-05-12T07-52-27-"+threadID+".jsonl")
+	if err := os.WriteFile(backendPath, []byte(backendContent), 0o644); err != nil {
+		t.Fatalf("write codex backend session: %v", err)
+	}
+
+	files := []sessionFileEntry{
+		{
+			filename:  "session-1.jsonl",
+			path:      path,
+			updatedAt: time.Unix(1700000000, 0),
+			byteSize:  int64(len(content)),
+		},
+	}
+
+	sessions, _, err := loadSessionBatch(files, 0, 1, filepath.Join(dir, "missing.db"))
+	if err != nil {
+		t.Fatalf("load session batch: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].codexThreadID != threadID {
+		t.Fatalf("expected codex thread id %q, got %q", threadID, sessions[0].codexThreadID)
+	}
+	if sessions[0].codexBackendPath != backendPath {
+		t.Fatalf("expected backend path %q, got %q", backendPath, sessions[0].codexBackendPath)
+	}
+	if sessions[0].codexMessageCount != 2 {
+		t.Fatalf("expected codex row count 2, got %d", sessions[0].codexMessageCount)
+	}
+	if sessions[0].codexEstimatedTokens != len(backendContent)/4 {
+		t.Fatalf("expected codex estimated tokens %d, got %d", len(backendContent)/4, sessions[0].codexEstimatedTokens)
+	}
+	if !strings.Contains(formatCodexSessionMetric(sessions[0]), "codex:2") {
+		t.Fatalf("expected codex session metric, got %q", formatCodexSessionMetric(sessions[0]))
+	}
+}
+
+func TestParseCodexBackendMessagesNormalizesEvents(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	content := `{"timestamp":"2026-05-12T14:52:29Z","type":"session_meta","payload":{"id":"thread-1","cwd":"/tmp","originator":"openclaw","cli_version":"0.130.0","source":"vscode","model_provider":"openai"}}` + "\n" +
+		`{"timestamp":"2026-05-12T14:52:30Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}` + "\n" +
+		`{"timestamp":"2026-05-12T14:52:31Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call-1","input":{"cmd":"true"}}}` + "\n" +
+		`{"timestamp":"2026-05-12T14:52:32Z","type":"event_msg","payload":{"type":"agent_message","message":"visible update"}}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write codex backend session: %v", err)
+	}
+
+	messages, err := parseCodexBackendMessages(path)
+	if err != nil {
+		t.Fatalf("parse codex backend messages: %v", err)
+	}
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(messages))
+	}
+	if messages[0].role != "system" || !strings.Contains(messages[0].text, "thread-1") {
+		t.Fatalf("expected session meta system row, got %#v", messages[0])
+	}
+	if messages[1].role != "assistant" || messages[1].text != "done" {
+		t.Fatalf("expected assistant message, got %#v", messages[1])
+	}
+	if messages[2].role != "tool" || !strings.Contains(messages[2].text, "[toolCall] exec") {
+		t.Fatalf("expected tool call row, got %#v", messages[2])
+	}
+	if messages[3].role != "assistant" || messages[3].text != "visible update" {
+		t.Fatalf("expected agent message event, got %#v", messages[3])
+	}
+}
+
 func TestLoadSessionBatchIncludesConversationMetadata(t *testing.T) {
 	t.Parallel()
 

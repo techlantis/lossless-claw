@@ -25,6 +25,7 @@ const (
 	screenSummaries
 	screenFiles
 	screenContext
+	screenCodexContextCompare
 )
 
 const (
@@ -253,7 +254,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resizeViewport()
-		m.refreshConversationViewport()
+		if m.screen == screenCodexContextCompare {
+			if session, ok := m.currentSession(); ok {
+				if err := m.openCodexContextCompareForSession(session); err != nil {
+					m.status = "Error: " + err.Error()
+				}
+			}
+		} else {
+			m.refreshConversationViewport()
+		}
 		return m, nil
 	case rewriteResultMsg:
 		if m.pendingRewrite == nil || m.pendingRewrite.summaryID != msg.summaryID || m.pendingRewrite.phase != rewriteInflight {
@@ -330,6 +339,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFilesKey(msg)
 	case screenContext:
 		return m.handleContextKey(msg)
+	case screenCodexContextCompare:
+		return m.handleCodexContextCompareKey(msg)
 	default:
 		return m, nil
 	}
@@ -392,6 +403,28 @@ func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.screen = screenConversation
+	case "x":
+		session, ok := m.currentSession()
+		if !ok {
+			m.status = "No session selected"
+			return m, nil
+		}
+		if err := m.openCodexBackendForSession(session); err != nil {
+			m.status = "Error: " + err.Error()
+			return m, nil
+		}
+		m.screen = screenConversation
+	case "v":
+		session, ok := m.currentSession()
+		if !ok {
+			m.status = "No session selected"
+			return m, nil
+		}
+		if err := m.openCodexContextCompareForSession(session); err != nil {
+			m.status = "Error: " + err.Error()
+			return m, nil
+		}
+		m.screen = screenCodexContextCompare
 	case "b", "backspace":
 		m.screen = screenAgents
 		m.sessionFiles = nil
@@ -513,6 +546,17 @@ func (m model) handleConversationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("Context: %d summaries + %d messages = %d items, %dk tokens",
 				summaryCount, messageCount, len(items), totalTokens/1000)
 		}
+	case "v":
+		session, ok := m.currentSession()
+		if !ok {
+			m.status = "No session selected"
+			return m, nil
+		}
+		if err := m.openCodexContextCompareForSession(session); err != nil {
+			m.status = "Error: " + err.Error()
+			return m, nil
+		}
+		m.screen = screenCodexContextCompare
 	}
 	return m, nil
 }
@@ -793,6 +837,36 @@ func (m model) handleContextKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleCodexContextCompareKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		m.convViewport.LineUp(1)
+	case "down", "j":
+		m.convViewport.LineDown(1)
+	case "pgup":
+		m.convViewport.HalfViewUp()
+	case "pgdown":
+		m.convViewport.HalfViewDown()
+	case "g":
+		m.convViewport.GotoTop()
+	case "G":
+		m.convViewport.GotoBottom()
+	case "r":
+		session, ok := m.currentSession()
+		if !ok {
+			m.status = "No session selected"
+			return m, nil
+		}
+		if err := m.openCodexContextCompareForSession(session); err != nil {
+			m.status = "Error: " + err.Error()
+		}
+	case "b", "backspace":
+		m.screen = screenSessions
+		m.status = "Back to sessions"
+	}
+	return m, nil
+}
+
 // openConversationForSession loads messages for the selected session into the conversation view.
 func (m *model) openConversationForSession(session sessionEntry) error {
 	m.conversationWindow.enabled = false
@@ -806,6 +880,83 @@ func (m *model) openConversationForSession(session sessionEntry) error {
 		return m.loadLatestConversationWindowForSession(session, "Loaded")
 	}
 	return m.loadConversationFromSessionFile(session, "Loaded")
+}
+
+// openCodexBackendForSession loads the native Codex backend rollout bound to a session.
+func (m *model) openCodexBackendForSession(session sessionEntry) error {
+	if session.codexThreadID == "" {
+		return fmt.Errorf("session has no Codex app-server binding")
+	}
+	if session.codexBackendPath == "" {
+		return fmt.Errorf("Codex binding %s has no local backend transcript", session.codexThreadID)
+	}
+	m.conversationWindow.enabled = false
+	m.conversationWindow.conversationID = 0
+	m.conversationWindow.oldestMessageID = 0
+	m.conversationWindow.newestMessageID = 0
+	m.conversationWindow.hasOlder = false
+	m.conversationWindow.hasNewer = false
+
+	parseStart := time.Now()
+	messages, err := parseCodexBackendMessages(session.codexBackendPath)
+	parseDuration := time.Since(parseStart)
+	if err != nil {
+		return err
+	}
+	m.messages = messages
+	renderDuration := m.refreshConversationViewportWithMode(conversationViewportBottom)
+	m.status = fmt.Sprintf(
+		"Loaded %d Codex backend rows thread:%s (file parse:%s render:%s)",
+		len(messages),
+		session.codexThreadID,
+		formatDuration(parseDuration),
+		formatDuration(renderDuration),
+	)
+	log.Printf(
+		"[lcm-tui] codex backend-load session=%s thread=%s messages=%d parse=%s render=%s path=%s",
+		session.id,
+		session.codexThreadID,
+		len(messages),
+		formatDuration(parseDuration),
+		formatDuration(renderDuration),
+		session.codexBackendPath,
+	)
+	return nil
+}
+
+// openCodexContextCompareForSession renders native Codex backend state beside LCM's managed context.
+func (m *model) openCodexContextCompareForSession(session sessionEntry) error {
+	if session.codexThreadID == "" {
+		return fmt.Errorf("session has no Codex app-server binding")
+	}
+	if session.codexBackendPath == "" {
+		return fmt.Errorf("Codex binding %s has no local backend transcript", session.codexThreadID)
+	}
+
+	parseStart := time.Now()
+	codexMessages, err := parseCodexBackendMessages(session.codexBackendPath)
+	parseDuration := time.Since(parseStart)
+	if err != nil {
+		return err
+	}
+	contextItems, err := loadContextItems(m.paths.lcmDBPath, session.id)
+	if err != nil {
+		return err
+	}
+	renderStart := time.Now()
+	content := renderCodexContextComparison(codexMessages, contextItems, m.convViewport.Width)
+	m.convViewport.SetContent(content)
+	m.convViewport.GotoBottom()
+	renderDuration := time.Since(renderStart)
+	m.status = fmt.Sprintf(
+		"Compare Codex %d rows ↔ LCM %d items thread:%s (parse:%s render:%s)",
+		len(codexMessages),
+		len(contextItems),
+		session.codexThreadID,
+		formatDuration(parseDuration),
+		formatDuration(renderDuration),
+	)
+	return nil
 }
 
 // reloadConversationWindow refreshes the conversation using the same loading mode as open.
@@ -1515,6 +1666,14 @@ func (m model) renderHeader() string {
 		if conversationID, ok := m.currentConversationID(); ok {
 			title += fmt.Sprintf(" | conv_id:%d", conversationID)
 		}
+	case screenCodexContextCompare:
+		title += " | Codex ↔ LCM Context"
+		if session, ok := m.currentSession(); ok {
+			title += fmt.Sprintf(" | session:%s", session.id)
+			if session.codexThreadID != "" {
+				title += fmt.Sprintf(" | codex:%s", session.codexThreadID)
+			}
+		}
 	}
 
 	help := m.renderHelp()
@@ -1526,9 +1685,9 @@ func (m model) renderHelp() string {
 	case screenAgents:
 		return "up/down: move | enter: open agent sessions | r: reload | q: quit"
 	case screenSessions:
-		return "up/down: move | enter: open conversation | b: back | r: reload | q: quit"
+		return "up/down: move | enter: open conversation | x: Codex backend | v: Codex↔LCM compare | b: back | r: reload | q: quit"
 	case screenConversation:
-		return "j/k/up/down: scroll | pgup/pgdown | g/G: top/bottom | [ / ]: older/newer window | r: reload | l: LCM summaries | c: context | f: LCM files | b: back | q: quit"
+		return "j/k/up/down: scroll | pgup/pgdown | g/G: top/bottom | [ / ]: older/newer window | r: reload | l: LCM summaries | c: context | f: LCM files | v: compare | b: back | q: quit"
 	case screenSummaries:
 		if m.pendingRewrite != nil {
 			switch m.pendingRewrite.phase {
@@ -1556,6 +1715,8 @@ func (m model) renderHelp() string {
 		return "up/down: move | g/G: top/bottom | r: reload | b: back | q: quit"
 	case screenContext:
 		return "up/down: move | g/G: top/bottom | r: reload | b: back | q: quit"
+	case screenCodexContextCompare:
+		return "j/k/up/down: scroll | pgup/pgdown | g/G: top/bottom | r: reload | b: back | q: quit"
 	default:
 		return "q: quit"
 	}
@@ -1575,6 +1736,8 @@ func (m model) renderBody() string {
 		return m.renderFiles()
 	case screenContext:
 		return m.renderContext()
+	case screenCodexContextCompare:
+		return m.renderCodexContextCompare()
 	default:
 		return "Unknown screen"
 	}
@@ -1627,12 +1790,13 @@ func (m model) renderSessions() string {
 			label += fmt.Sprintf("  key:%s", session.sessionKey)
 		}
 		line := fmt.Sprintf(
-			"  %-*s  %-19s  %-9s  %-12s  %-14s  %-8s  %-9s",
+			"  %-*s  %-19s  %-9s  %-12s  %-12s  %-14s  %-8s  %-9s",
 			labelWidth,
 			truncateString(label, labelWidth),
 			formatTimeForList(session.updatedAt),
 			fmt.Sprintf("msgs:%s", formatMessageCount(session.messageCount)),
 			fmt.Sprintf("est:%dt", session.estimatedTokens),
+			formatCodexSessionMetric(session),
 			formatOptionalSessionMetric("conv_id", session.conversationID > 0, session.conversationID),
 			formatOptionalSessionMetric("sums", session.summaryCount > 0, session.summaryCount),
 			formatOptionalSessionMetric("files", session.fileCount > 0, session.fileCount),
@@ -1649,7 +1813,7 @@ func (m model) sessionListLabelWidth(offset, end int) int {
 	const (
 		minLabelWidth = 24
 		maxLabelWidth = 72
-		fixedColumns  = 2 + 19 + 2 + 9 + 2 + 12 + 2 + 14 + 2 + 8 + 2 + 9
+		fixedColumns  = 2 + 19 + 2 + 9 + 2 + 12 + 2 + 12 + 2 + 14 + 2 + 8 + 2 + 9
 		rowPrefix     = 2
 	)
 
@@ -1674,12 +1838,32 @@ func formatOptionalSessionMetric(label string, present bool, value any) string {
 	return fmt.Sprintf("%s:%v", label, value)
 }
 
+func formatCodexSessionMetric(session sessionEntry) string {
+	if session.codexThreadID == "" {
+		return ""
+	}
+	if session.codexBackendPath == "" {
+		return "codex:meta"
+	}
+	if session.codexMessageCount > 0 {
+		return fmt.Sprintf("codex:%d", session.codexMessageCount)
+	}
+	return "codex:yes"
+}
+
 func (m model) renderConversation() string {
 	if len(m.messages) == 0 {
 		return "No messages found in this session"
 	}
 	if m.convViewport.Width <= 0 || m.convViewport.Height <= 0 {
 		return "Resizing conversation viewport..."
+	}
+	return m.convViewport.View()
+}
+
+func (m model) renderCodexContextCompare() string {
+	if m.convViewport.Width <= 0 || m.convViewport.Height <= 0 {
+		return "Resizing comparison viewport..."
 	}
 	return m.convViewport.View()
 }

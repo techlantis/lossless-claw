@@ -49,7 +49,7 @@ Lists all agents discovered under `~/.openclaw/agents/`. Select an agent to see 
 
 ### Screen 2: Session List
 
-Shows JSONL session files for the selected agent, sorted by last modified time. Each entry shows the filename, last update time, message count, conversation ID (if LCM-tracked), summary count, and large file count.
+Shows JSONL session files for the selected agent, sorted by last modified time. Each entry shows the filename, last update time, message count, conversation ID (if LCM-tracked), summary count, and large file count. If an OpenClaw session has a Codex app-server binding, the row also shows a `codex:` marker with the local backend rollout row count when available.
 
 Sessions load in batches of 50. Scrolling near the bottom automatically loads more.
 
@@ -57,6 +57,8 @@ Sessions load in batches of 50. Scrolling near the bottom automatically loads mo
 |-----|--------|
 | `↑`/`↓` or `k`/`j` | Move cursor |
 | `Enter` | Open conversation |
+| `x` | Open bound Codex backend rollout transcript, when available |
+| `v` | Compare bound Codex backend rollout against the LCM active context |
 | `b`/`Backspace` | Back to agents |
 | `r` | Reload sessions |
 | `q` | Quit |
@@ -85,9 +87,14 @@ For sessions with an LCM `conv_id`, the conversation view uses keyset-paged wind
 | `l` | Open **Summary DAG** view |
 | `c` | Open **Context** view |
 | `f` | Open **Large Files** view |
+| `v` | Open **Codex ↔ LCM** comparison view |
 | `b`/`Backspace` | Back to sessions |
 | `r` | Reload messages |
 | `q` | Quit |
+
+### Codex ↔ LCM Comparison
+
+For Codex app-server bound sessions, the comparison view renders native Codex backend rollout rows beside the Lossless-managed active context items for the same OpenClaw session. The panes are index-aligned for inspection rather than treated as a causal one-to-one mapping: Codex rows show what the backend session recorded, while LCM rows show summaries and fresh-tail messages that Lossless would assemble.
 
 ## Summary DAG View
 

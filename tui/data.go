@@ -34,16 +34,20 @@ type agentEntry struct {
 
 // sessionEntry describes one JSONL session file.
 type sessionEntry struct {
-	id              string
-	sessionKey      string
-	filename        string
-	path            string
-	updatedAt       time.Time
-	conversationID  int64
-	messageCount    int
-	estimatedTokens int
-	summaryCount    int
-	fileCount       int
+	id                   string
+	sessionKey           string
+	filename             string
+	path                 string
+	updatedAt            time.Time
+	conversationID       int64
+	messageCount         int
+	estimatedTokens      int
+	codexThreadID        string
+	codexBackendPath     string
+	codexMessageCount    int
+	codexEstimatedTokens int
+	summaryCount         int
+	fileCount            int
 }
 
 // sessionFileEntry stores lightweight metadata used for incremental loading.
@@ -318,14 +322,19 @@ func loadSessionBatch(files []sessionFileEntry, offset, limit int, lcmDBPath str
 			messageCount = -1
 		}
 		id := strings.TrimSuffix(file.filename, filepath.Ext(file.filename))
+		codexBackend := loadCodexBackendMetadata(file.path)
 		sessionIDs = append(sessionIDs, id)
 		sessions = append(sessions, sessionEntry{
-			id:              id,
-			filename:        file.filename,
-			path:            file.path,
-			updatedAt:       file.updatedAt,
-			messageCount:    messageCount,
-			estimatedTokens: estimateTokenCountFromBytes(file.byteSize),
+			id:                   id,
+			filename:             file.filename,
+			path:                 file.path,
+			updatedAt:            file.updatedAt,
+			messageCount:         messageCount,
+			estimatedTokens:      estimateTokenCountFromBytes(file.byteSize),
+			codexThreadID:        codexBackend.threadID,
+			codexBackendPath:     codexBackend.path,
+			codexMessageCount:    codexBackend.messageCount,
+			codexEstimatedTokens: codexBackend.estimatedTokens,
 		})
 	}
 
