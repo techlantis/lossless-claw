@@ -170,6 +170,12 @@ The OpenClaw type is `ContextEnginePromptCacheInfo`, with these fields:
 - `expiresAt`: known expiry timestamp when the runtime can source it
   confidently. Lossless Claw does not currently consume this field.
 
+Ignoring `expiresAt` is a meaningful gap. When the runtime can provide a
+confident expiry timestamp, that timestamp is a better hot-cache deadline than
+Lossless Claw's reconstructed `lastCacheTouchAt + retention-derived TTL`
+estimate. The fallback TTL path remains necessary when expiry is unknown, but
+it should not override a runtime-sourced expiry.
+
 The pi embedded runner builds the value after the attempt completes:
 
 - It finds the assistant message for the current attempt.
@@ -209,6 +215,12 @@ Lossless Claw persists cache and compaction state in
 | `last_cache_touch_at` | Best-known cache touch timestamp. |
 | `provider` | Runtime provider identifier. |
 | `model` | Runtime model identifier. |
+
+There is currently no stored `expires_at` field. That means Lossless Claw can
+only reconstruct expiry from `retention`, `cacheTTLSeconds`, and the latest
+cache touch. The target design should persist a runtime-provided expiry when
+OpenClaw supplies one, then use it as the primary clock for hot-cache delay and
+cold-debt drain eligibility.
 
 Telemetry is updated in `afterTurn` before incremental compaction policy is
 evaluated. If `runtimeContext.promptCache` is missing, Lossless Claw still
@@ -264,6 +276,16 @@ The TTL touch source is:
 1. `lastCacheTouchAt`;
 2. `lastObservedCacheHitAt`;
 3. `lastApiCallAt`.
+
+The target gate should first check a runtime-provided `expiresAt` when one is
+available and trustworthy:
+
+```text
+if expiresAt is present:
+  hot while now < expiresAt
+else:
+  hot while now < resolved_touch_time + resolved_ttl
+```
 
 This fallback chain intentionally treats recent API activity for
 mutation-sensitive families as cache-relevant when explicit telemetry is weak.
@@ -358,7 +380,9 @@ Recording debt should stay eager:
 Draining cold-cache debt should be conditional:
 
 - Drain immediately under critical pressure.
-- Drain after the effective cache TTL expires from the last cache touch.
+- Drain after the runtime-provided `expiresAt` passes, when available.
+- Drain after the effective cache TTL expires from the last cache touch when
+  `expiresAt` is unavailable.
 - Drain when prompt pressure is high enough that waiting is more expensive than
   cache preservation.
 - Drain when the debt itself has been pending too long, even if ongoing turns
@@ -371,7 +395,9 @@ record_debt(reason="cold-cache-catchup")
 
 if critical_pressure:
   drain
-else if cache_ttl_expired(last_cache_touch_at):
+else if runtime_expires_at_passed:
+  drain
+else if no_runtime_expires_at and cache_ttl_expired(last_cache_touch_at):
   drain
 else if soft_pressure_threshold_crossed:
   drain bounded catch-up
@@ -384,10 +410,13 @@ else:
 This restores the missing distinction:
 
 - **Observation age** asks when the cold-cache signal happened.
-- **Cache touch age** asks whether the provider cache is likely still reusable.
+- **Runtime expiry** asks whether OpenClaw already knows the cache should no
+  longer be considered hot.
+- **Cache touch age** asks whether the provider cache is likely still reusable
+  when runtime expiry is unavailable.
 - **Debt age** asks how long compaction has already been waiting.
 
-The system needs all three.
+The system needs all four signals.
 
 ## Suggested Pressure Ladder
 
@@ -430,6 +459,10 @@ The cache-aware compaction policy should preserve these invariants:
   chooses not to run it.
 - Deferred debt must not be able to stay pending forever solely because active
   turns keep refreshing `lastCacheTouchAt`.
+- A runtime-provided `expiresAt` must take precedence over locally
+  reconstructing expiry from `lastCacheTouchAt` and retention.
+- If `expiresAt` is absent, the retention-derived TTL fallback remains the
+  correct conservative behavior.
 - Background drain, `maintain()`, and `assemble()` must apply the same drain
   eligibility semantics.
 - Budget comparisons must use the same capped token budget that execution will
@@ -447,6 +480,12 @@ gate immediately after a request that wrote a new cache.
 overflow recovery becomes the dominant maintenance path. This is most likely
 when every active turn refreshes `lastCacheTouchAt` and deferred debt has no
 separate age-based escape hatch.
+
+**Ignoring runtime expiry** can cause both over-preservation and
+under-preservation. If Lossless Claw's fallback TTL runs longer than
+OpenClaw's known `expiresAt`, compaction may wait on a cache that is already
+expired. If the fallback TTL runs shorter than a known runtime expiry,
+compaction may break a cache that OpenClaw still expects to be useful.
 
 **Misclassifying routing noise as cold** can trigger unnecessary catch-up.
 `coldCacheObservationThreshold` exists to dampen this for non-explicit breaks,
@@ -554,6 +593,7 @@ The main implementation points are:
 | Lossless config defaults | `src/db/config.ts` |
 | Lossless telemetry store | `src/store/compaction-telemetry-store.ts` |
 | Lossless maintenance store | `src/store/compaction-maintenance-store.ts` |
+| Lossless telemetry schema | `src/db/migration.ts` |
 | Cache-state and hot-delay policy | `src/engine.ts` |
 | Incremental compaction decision | `src/engine.ts` |
 | Deferred background drain | `src/engine.ts` |
@@ -567,7 +607,11 @@ The corrected policy should have focused regression coverage for these cases:
 
 - Cold-cache catch-up debt with recent cache touch and low pressure stays
   pending.
-- The same debt drains after TTL expiry.
+- Runtime-provided `expiresAt` keeps cold-cache debt pending until that
+  timestamp passes.
+- Runtime-provided `expiresAt` allows debt to drain after expiry even when the
+  fallback retention-derived TTL would still consider the cache hot.
+- The same debt drains after fallback TTL expiry when `expiresAt` is absent.
 - The same debt drains after soft pressure is crossed.
 - The same debt drains after maximum debt age even if `lastCacheTouchAt` remains
   fresh.
@@ -591,5 +635,5 @@ started cold. Do not preserve a prompt cache so long that compaction debt become
 the emergency overflow handler's problem.
 ```
 
-The implementation should make that rule explicit by tracking observation age,
-cache touch age, debt age, and token pressure separately.
+The implementation should make that rule explicit by tracking runtime expiry,
+observation age, cache touch age, debt age, and token pressure separately.
