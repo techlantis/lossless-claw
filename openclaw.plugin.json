@@ -29,7 +29,7 @@
       "help": "Optional post-compaction target as a fraction of token budget (0.05–1.0). Explicit target-fraction compactions continue until current tokens drop to compactionTargetFraction × tokenBudget."
     },
     "codexOAuthProfile": {
-      "label": "Codex OAuth Profile",
+      "label": "Codex Profile",
       "help": "When 'auto' (default) and the host is configured for Codex (openai-codex provider), Codex-tuned defaults apply: contextThreshold=0.90, compactionTargetFraction=0.35, proactiveThresholdCompactionMode=deferred. Operator overrides (env / plugin config) still win. Set to 'off' to disable the profile entirely."
     },
     "sweepMaxDepth": {
