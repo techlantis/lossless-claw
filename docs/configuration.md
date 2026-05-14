@@ -90,7 +90,7 @@ Notes on the example:
 - `timezone` has no fixed hardcoded default; at runtime it resolves from `TZ` first, then the system timezone. The example uses `America/Los_Angeles`.
 - `maxAssemblyTokenBudget` has no default. The example uses `30000` as a realistic cap for a 32k-class model.
 - `summaryPrefixTargetTokens` has no fixed default. The example uses `20000`, which matches the derived default for large-context models with the default `leafChunkTokens`.
-- `compactionTargetFraction` has no fixed default unless the Codex profile is active. The example uses the Codex profile value, `0.35`.
+- `compactionTargetFraction` has no fixed default unless the Codex profile is active. The example shows the Codex profile value, `0.35`; omit it for standard hosts unless you are deliberately configuring explicit target-fraction compaction.
 - `databasePath` is the preferred key. `dbPath` is an accepted alias.
 - `largeFileThresholdTokens` is the preferred key. `largeFileTokenThreshold` is an accepted alias.
 
@@ -150,7 +150,7 @@ Every automatic decision emits grep-able log lines prefixed with `[lcm] auto-rot
 | --- | --- | --- | --- | --- |
 | `contextThreshold` | `number` | `0.75` | `LCM_CONTEXT_THRESHOLD` | Fraction of the active model context window that triggers compaction. |
 | `codexOAuthProfile` | `"auto" \| "off"` | `"auto"` | none | Applies Codex-tuned defaults when the plugin detects the `openai-codex` provider. Set to `"off"` to disable this profile. |
-| `compactionTargetFraction` | `number` | unset, or `0.35` when the Codex profile applies | `LCM_COMPACTION_TARGET_FRACTION` | Optional post-compaction target for explicit target-fraction compactions. Normal threshold sweeps do not use this field unless the caller supplies it. |
+| `compactionTargetFraction` | `number` | unset, or `0.35` when the Codex profile applies | `LCM_COMPACTION_TARGET_FRACTION` | Optional whole-context landing target for explicit target-fraction compactions. Normal after-turn threshold sweeps do not use this field. |
 | `freshTailCount` | `integer` | `64` | `LCM_FRESH_TAIL_COUNT` | Number of newest messages always kept raw. |
 | `freshTailMaxTokens` | `integer` | unset | `LCM_FRESH_TAIL_MAX_TOKENS` | Optional token cap for the protected fresh tail. The newest message is always preserved even if it exceeds the cap. |
 | `promptAwareEviction` | `boolean` | `false` | `LCM_PROMPT_AWARE_EVICTION_ENABLED` | When enabled, budget-constrained assembly keeps older evictable items by prompt relevance instead of pure chronology. This improves retrieval under tight budgets, but it can reduce prompt-cache hit rates because the preserved prefix changes as prompts change. |
@@ -229,7 +229,13 @@ Lossless still records prompt-cache telemetry for status and diagnostics, but ca
 
 Full sweeps treat `sweepMaxDepth` as the normal depth target, not an absolute safety ceiling. The routine condensation phase obeys `sweepMaxDepth`; if the context is still over threshold or the summarized prefix remains above `summaryPrefixTargetTokens`, a pressure phase may use `condensedMinFanoutHard` and condense deeper. This keeps ordinary sweeps shallow while still giving Lossless a way out when too many same-depth summaries would otherwise leave the prompt near full.
 
-`compactionTargetFraction` is separate from ordinary threshold triggering. It is used when an explicit target-fraction compaction is requested, most importantly by the Codex compaction intercept path. With the Codex profile active, Lossless aligns the trigger with Codex's 90% high-water mark and targets 35% of the active token budget after the intercepted sweep. That gives autonomous coding loops more headroom while still relying on the threshold-only automatic path for normal after-turn compaction.
+The target-related knobs deliberately have separate scopes:
+
+- `contextThreshold` is the automatic high-water trigger. After each turn, Lossless only decides whether context is full enough to compact.
+- `summaryPrefixTargetTokens` is the normal full-sweep summarized-prefix pressure target. It decides whether a threshold sweep should condense summaries deeper after the routine `sweepMaxDepth` pass.
+- `compactionTargetFraction` is a whole-context landing target for explicit target-fraction compaction requests. It is not the tuning knob for ordinary after-turn threshold sweeps.
+
+Use `contextThreshold`, `leafChunkTokens`, `summaryPrefixTargetTokens`, `sweepMaxDepth`, and fanout settings to tune normal automatic compaction. Use `compactionTargetFraction` when a caller explicitly wants an accordion cadence, most importantly the Codex compaction intercept path. With the Codex profile active, Lossless aligns the trigger with Codex's 90% high-water mark and targets 35% of the active token budget after the intercepted sweep. That gives autonomous coding loops more headroom while keeping normal after-turn compaction threshold-only.
 
 ### Prompt-aware eviction
 

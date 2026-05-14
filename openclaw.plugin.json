@@ -26,7 +26,7 @@
     },
     "compactionTargetFraction": {
       "label": "Compaction Target Fraction",
-      "help": "Optional post-compaction target as a fraction of token budget (0.05–1.0). Explicit target-fraction compactions continue until current tokens drop to compactionTargetFraction × tokenBudget."
+      "help": "Optional whole-context landing target for explicit target-fraction compactions (0.05–1.0). Normal after-turn threshold sweeps do not use this field; tune contextThreshold and summaryPrefixTargetTokens for ordinary automatic compaction."
     },
     "codexOAuthProfile": {
       "label": "Codex Profile",

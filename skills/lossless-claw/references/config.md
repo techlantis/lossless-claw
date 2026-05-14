@@ -46,11 +46,11 @@ Good default:
 
 ### `compactionTargetFraction`
 
-Optional post-compaction target for explicit target-fraction compactions.
+Optional whole-context landing target for explicit target-fraction compactions.
 
 Why it matters:
 
-- Normal after-turn threshold sweeps do not use this field unless the caller supplies it.
+- Normal after-turn threshold sweeps do not use this field.
 - The Codex profile sets this to `0.35` so intercepted Codex compactions create a larger headroom band before the next trigger.
 - Values below `0.05` are ignored as unsafe.
 
@@ -58,6 +58,8 @@ Good default:
 
 - Leave unset for standard hosts.
 - Use `0.35` for Codex-provider autonomous loops.
+
+Do not use this as the first tuning knob for ordinary automatic compaction. For normal threshold sweeps, tune `contextThreshold`, `leafChunkTokens`, `summaryPrefixTargetTokens`, `sweepMaxDepth`, and fanout instead.
 
 ### `freshTailCount`
 
@@ -191,6 +193,7 @@ Why it matters:
 - Gives Lossless an escape hatch when too many summaries at the preferred depth still leave the prompt near full.
 - When unset, Lossless derives a target from `contextThreshold`, the active token budget, and `leafChunkTokens`.
 - Sweeps first honor `sweepMaxDepth`; pressure condensation can go deeper only when threshold or summary-prefix pressure remains.
+- This is the target knob for normal threshold full sweeps. `compactionTargetFraction` is reserved for explicit whole-context target-fraction requests such as Codex intercept.
 
 ### `incrementalMaxDepth`
 
