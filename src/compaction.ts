@@ -181,7 +181,7 @@ function generateSummaryId(content: string): string {
 
 /** Maximum estimated tokens for the deterministic fallback truncation. */
 const FALLBACK_MAX_TOKENS = 512;
-const DEFAULT_LEAF_CHUNK_TOKENS = 40_000;
+const DEFAULT_LEAF_CHUNK_TOKENS = 20_000;
 
 /**
  * Pattern matching MEDIA:/... file path references that appear in message content
