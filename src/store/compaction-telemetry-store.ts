@@ -21,6 +21,7 @@ export type ConversationCompactionTelemetryRecord = {
   lastActivityBand: ActivityBand;
   lastApiCallAt: Date | null;
   lastCacheTouchAt: Date | null;
+  cacheExpiresAt: Date | null;
   provider: string | null;
   model: string | null;
   updatedAt: Date;
@@ -42,6 +43,7 @@ export type UpsertConversationCompactionTelemetryInput = {
   lastActivityBand?: ActivityBand;
   lastApiCallAt?: Date | null;
   lastCacheTouchAt?: Date | null;
+  cacheExpiresAt?: Date | null;
   provider?: string | null;
   model?: string | null;
 };
@@ -62,6 +64,7 @@ type ConversationCompactionTelemetryRow = {
   last_activity_band: ActivityBand | null;
   last_api_call_at: string | null;
   last_cache_touch_at: string | null;
+  cache_expires_at: string | null;
   provider: string | null;
   model: string | null;
   updated_at: string;
@@ -86,6 +89,7 @@ function toConversationCompactionTelemetryRecord(
     lastActivityBand: row.last_activity_band ?? "low",
     lastApiCallAt: parseUtcTimestampOrNull(row.last_api_call_at),
     lastCacheTouchAt: parseUtcTimestampOrNull(row.last_cache_touch_at),
+    cacheExpiresAt: parseUtcTimestampOrNull(row.cache_expires_at),
     provider: row.provider,
     model: row.model,
     updatedAt: parseUtcTimestampOrNull(row.updated_at) ?? new Date(0),
@@ -126,6 +130,7 @@ export class CompactionTelemetryStore {
            last_activity_band,
            last_api_call_at,
            last_cache_touch_at,
+           cache_expires_at,
            provider,
            model,
            updated_at
@@ -158,10 +163,11 @@ export class CompactionTelemetryStore {
            last_activity_band,
            last_api_call_at,
            last_cache_touch_at,
+           cache_expires_at,
            provider,
            model,
            updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(conversation_id) DO UPDATE SET
            last_observed_cache_read = excluded.last_observed_cache_read,
            last_observed_cache_write = excluded.last_observed_cache_write,
@@ -177,6 +183,7 @@ export class CompactionTelemetryStore {
            last_activity_band = excluded.last_activity_band,
            last_api_call_at = excluded.last_api_call_at,
            last_cache_touch_at = excluded.last_cache_touch_at,
+           cache_expires_at = excluded.cache_expires_at,
            provider = excluded.provider,
            model = excluded.model,
            updated_at = datetime('now')`,
@@ -197,6 +204,7 @@ export class CompactionTelemetryStore {
         input.lastActivityBand ?? "low",
         input.lastApiCallAt?.toISOString() ?? null,
         input.lastCacheTouchAt?.toISOString() ?? null,
+        input.cacheExpiresAt?.toISOString() ?? null,
         input.provider ?? null,
         input.model ?? null,
       );

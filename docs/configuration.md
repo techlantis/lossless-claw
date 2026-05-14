@@ -212,6 +212,7 @@ When cache-aware compaction is enabled:
 - hot cache stretches the incremental leaf trigger to `dynamicLeafChunkTokens.max`
 - hot cache skips incremental maintenance entirely when the assembled context is still comfortably below the real token budget
 - hot cache also gets a short hysteresis window so one ambiguous turn does not immediately discard a recently healthy cache signal
+- explicit runtime `promptCache.expiresAt` telemetry is authoritative when present; future expiry keeps mutation-sensitive deferred compaction cache-safe, and elapsed expiry lets cold-cache catch-up proceed without waiting for fallback TTL heuristics
 - cold cache still allows bounded catch-up passes via `cacheAwareCompaction.maxColdCacheCatchupPasses`
 - once `currentTokenCount >= criticalBudgetPressureRatio * tokenBudget`, deferred compaction bypasses hot-cache delay so prompt-mutating debt can run before emergency overflow handling
 

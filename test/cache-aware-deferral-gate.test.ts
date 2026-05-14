@@ -103,6 +103,7 @@ function makeHotCodexTelemetry(
     consecutiveColdObservations: 0,
     lastApiCallAt: new Date(Date.now() - 30_000),
     lastCacheTouchAt: new Date(Date.now() - 30_000),
+    cacheExpiresAt: null,
     provider: "openai-codex",
     model: "gpt-5.5",
     lastObservedPromptTokenCount: 100_000,
@@ -124,6 +125,62 @@ describe("shouldDelayPromptMutatingDeferredCompaction (cache-aware deferral gate
     }).shouldDelayPromptMutatingDeferredCompaction.bind(engine);
 
     expect(gate(makeHotCodexTelemetry(), new Date(), 100_000, 200_000)).toBe(true);
+  });
+
+  it("defers when explicit cache expiry is still in the future even if touch telemetry is stale", () => {
+    const engine = createEngine();
+    const gate = (engine as unknown as {
+      shouldDelayPromptMutatingDeferredCompaction: (
+        telemetry: ConversationCompactionTelemetryRecord | null,
+        now?: Date,
+        currentTokenCount?: number,
+        tokenBudget?: number,
+      ) => boolean;
+    }).shouldDelayPromptMutatingDeferredCompaction.bind(engine);
+    const now = new Date("2026-05-14T12:00:00.000Z");
+
+    expect(
+      gate(
+        makeHotCodexTelemetry({
+          retention: null,
+          lastObservedCacheHitAt: null,
+          lastApiCallAt: null,
+          lastCacheTouchAt: new Date(now.getTime() - 10 * 60_000),
+          cacheExpiresAt: new Date(now.getTime() + 60_000),
+        }),
+        now,
+        100_000,
+        200_000,
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT defer when explicit cache expiry has elapsed despite a recent touch", () => {
+    const engine = createEngine();
+    const gate = (engine as unknown as {
+      shouldDelayPromptMutatingDeferredCompaction: (
+        telemetry: ConversationCompactionTelemetryRecord | null,
+        now?: Date,
+        currentTokenCount?: number,
+        tokenBudget?: number,
+      ) => boolean;
+    }).shouldDelayPromptMutatingDeferredCompaction.bind(engine);
+    const now = new Date("2026-05-14T12:00:00.000Z");
+
+    expect(
+      gate(
+        makeHotCodexTelemetry({
+          retention: "long",
+          lastObservedCacheHitAt: now,
+          lastApiCallAt: now,
+          lastCacheTouchAt: now,
+          cacheExpiresAt: new Date(now.getTime() - 1),
+        }),
+        now,
+        100_000,
+        200_000,
+      ),
+    ).toBe(false);
   });
 
   it("does NOT defer when cacheAwareCompaction.enabled is false (operator opt-out)", () => {

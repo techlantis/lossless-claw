@@ -107,6 +107,7 @@ type PromptCacheSnapshot = {
   retention?: string;
   sawExplicitBreak: boolean;
   lastCacheTouchAt?: Date;
+  cacheExpiresAt?: Date;
   provider?: string;
   model?: string;
 };
@@ -401,6 +402,19 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function safeBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function safeDate(value: unknown): Date | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value);
+  }
+  if (typeof value === "string") {
+    const timestamp = Date.parse(value);
+    if (Number.isFinite(timestamp)) {
+      return new Date(timestamp);
+    }
+  }
+  return undefined;
 }
 
 function extractTranscriptToolCallId(message: AgentMessage): string | undefined {
@@ -2232,9 +2246,16 @@ export class LcmContextEngine implements ContextEngine {
   /** Resolve the effective cache state the incremental compaction policy should react to. */
   private resolveCacheAwareState(
     telemetry: ConversationCompactionTelemetryRecord | null,
+    now: Date = new Date(),
   ): CacheState {
     if (!telemetry) {
       return "unknown";
+    }
+    if (this.hasFreshPromptCacheBreak(telemetry)) {
+      return "cold";
+    }
+    if (telemetry.cacheExpiresAt) {
+      return telemetry.cacheExpiresAt.getTime() > now.getTime() ? "hot" : "cold";
     }
     if (this.isObservedCacheReadShareCold(telemetry)) {
       return "cold";
@@ -2244,15 +2265,6 @@ export class LcmContextEngine implements ContextEngine {
     }
     if (this.shouldApplyHotCacheHysteresis(telemetry)) {
       return "hot";
-    }
-    if (
-      telemetry.lastObservedCacheBreakAt
-      && (
-        !telemetry.lastObservedCacheHitAt
-        || telemetry.lastObservedCacheBreakAt >= telemetry.lastObservedCacheHitAt
-      )
-    ) {
-      return "cold";
     }
     if (
       telemetry.consecutiveColdObservations
@@ -2311,6 +2323,9 @@ export class LcmContextEngine implements ContextEngine {
     telemetry: ConversationCompactionTelemetryRecord | null,
     now: Date = new Date(),
   ): boolean {
+    if (telemetry?.cacheExpiresAt) {
+      return telemetry.cacheExpiresAt.getTime() > now.getTime();
+    }
     const ttlMs = this.resolvePromptCacheTtlMs(telemetry?.retention ?? null);
     if (!ttlMs) {
       return false;
@@ -2710,11 +2725,8 @@ export class LcmContextEngine implements ContextEngine {
     })();
     const sawExplicitBreak = safeBoolean(observation?.broke) === true;
     const retention = safeString(promptCache?.retention)?.trim();
-    const lastCacheTouchAtRaw = promptCache?.lastCacheTouchAt;
-    const lastCacheTouchAt =
-      typeof lastCacheTouchAtRaw === "number" && Number.isFinite(lastCacheTouchAtRaw)
-        ? new Date(lastCacheTouchAtRaw)
-        : undefined;
+    const lastCacheTouchAt = safeDate(promptCache?.lastCacheTouchAt);
+    const cacheExpiresAt = safeDate(promptCache?.expiresAt);
     const hasUsageSignal = cacheRead !== undefined || cacheWrite !== undefined;
     const hasObservationSignal =
       typeof observation?.cacheRead === "number"
@@ -2742,6 +2754,7 @@ export class LcmContextEngine implements ContextEngine {
       ...(retention ? { retention } : {}),
       sawExplicitBreak,
       ...(lastCacheTouchAt ? { lastCacheTouchAt } : {}),
+      ...(cacheExpiresAt ? { cacheExpiresAt } : {}),
       ...(provider ? { provider } : {}),
       ...(model ? { model } : {}),
     };
@@ -2817,6 +2830,7 @@ export class LcmContextEngine implements ContextEngine {
       lastActivityBand,
       lastApiCallAt: now,
       lastCacheTouchAt: touchedPromptCache,
+      cacheExpiresAt: snapshot ? (snapshot.cacheExpiresAt ?? null) : existing?.cacheExpiresAt ?? null,
       provider: snapshot?.provider ?? existing?.provider ?? null,
       model: snapshot?.model ?? existing?.model ?? null,
     });
@@ -2825,7 +2839,7 @@ export class LcmContextEngine implements ContextEngine {
     );
     if (updated) {
       this.deps.log.debug(
-        `[lcm] compaction telemetry updated: conversation=${params.conversationId} cacheState=${updated.cacheState} coldObservationStreak=${updated.consecutiveColdObservations} cacheRead=${updated.lastObservedCacheRead ?? "null"} cacheWrite=${updated.lastObservedCacheWrite ?? "null"} promptTokenCount=${updated.lastObservedPromptTokenCount ?? "null"} retention=${updated.retention ?? "null"} lastApiCallAt=${updated.lastApiCallAt?.toISOString() ?? "null"} lastCacheTouchAt=${updated.lastCacheTouchAt?.toISOString() ?? "null"} provider=${updated.provider ?? "null"} model=${updated.model ?? "null"} turnsSinceLeafCompaction=${updated.turnsSinceLeafCompaction} tokensSinceLeafCompaction=${updated.tokensAccumulatedSinceLeafCompaction} activityBand=${updated.lastActivityBand} rawTokensOutsideTail=${params.rawTokensOutsideTail ?? "null"} tokenBudget=${params.tokenBudget ?? "null"}`,
+        `[lcm] compaction telemetry updated: conversation=${params.conversationId} cacheState=${updated.cacheState} coldObservationStreak=${updated.consecutiveColdObservations} cacheRead=${updated.lastObservedCacheRead ?? "null"} cacheWrite=${updated.lastObservedCacheWrite ?? "null"} promptTokenCount=${updated.lastObservedPromptTokenCount ?? "null"} retention=${updated.retention ?? "null"} lastApiCallAt=${updated.lastApiCallAt?.toISOString() ?? "null"} lastCacheTouchAt=${updated.lastCacheTouchAt?.toISOString() ?? "null"} cacheExpiresAt=${updated.cacheExpiresAt?.toISOString() ?? "null"} provider=${updated.provider ?? "null"} model=${updated.model ?? "null"} turnsSinceLeafCompaction=${updated.turnsSinceLeafCompaction} tokensSinceLeafCompaction=${updated.tokensAccumulatedSinceLeafCompaction} activityBand=${updated.lastActivityBand} rawTokensOutsideTail=${params.rawTokensOutsideTail ?? "null"} tokenBudget=${params.tokenBudget ?? "null"}`,
       );
     }
     return updated;
@@ -2855,6 +2869,7 @@ export class LcmContextEngine implements ContextEngine {
       lastActivityBand: params.activityBand ?? existing?.lastActivityBand ?? "low",
       lastApiCallAt: existing?.lastApiCallAt ?? null,
       lastCacheTouchAt: existing?.lastCacheTouchAt ?? null,
+      cacheExpiresAt: existing?.cacheExpiresAt ?? null,
       provider: existing?.provider ?? null,
       model: existing?.model ?? null,
     });

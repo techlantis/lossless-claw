@@ -104,6 +104,39 @@ function seedLegacySummaryGraph(db: ReturnType<typeof getLcmConnection>): void {
 }
 
 describe("runLcmMigrations summary depth backfill", () => {
+  it("adds cache expiry telemetry to legacy compaction telemetry tables", () => {
+    const db = createTestDb("legacy-cache-expiry.db");
+
+    db.exec(`
+      CREATE TABLE conversations (
+        conversation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        title TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE conversation_compaction_telemetry (
+        conversation_id INTEGER PRIMARY KEY REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+        last_observed_cache_read INTEGER,
+        last_observed_cache_write INTEGER,
+        last_observed_cache_hit_at TEXT,
+        last_observed_cache_break_at TEXT,
+        cache_state TEXT NOT NULL DEFAULT 'unknown'
+          CHECK (cache_state IN ('hot', 'cold', 'unknown')),
+        retention TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+
+    runLcmMigrations(db, { fts5Available: false });
+
+    const telemetryColumns = db.prepare(`PRAGMA table_info(conversation_compaction_telemetry)`).all() as Array<{
+      name?: string;
+    }>;
+    expect(telemetryColumns.some((column) => column.name === "cache_expires_at")).toBe(true);
+  });
+
   it("adds depth and metadata from summary lineage", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-migration-"));
     tempDirs.push(tempDir);

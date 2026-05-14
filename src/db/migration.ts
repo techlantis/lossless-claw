@@ -122,6 +122,7 @@ function ensureCompactionTelemetryColumns(db: DatabaseSync): void {
   const hasLastActivityBand = telemetryColumns.some((col) => col.name === "last_activity_band");
   const hasLastApiCallAt = telemetryColumns.some((col) => col.name === "last_api_call_at");
   const hasLastCacheTouchAt = telemetryColumns.some((col) => col.name === "last_cache_touch_at");
+  const hasCacheExpiresAt = telemetryColumns.some((col) => col.name === "cache_expires_at");
   const hasProvider = telemetryColumns.some((col) => col.name === "provider");
   const hasModel = telemetryColumns.some((col) => col.name === "model");
   const hasLastObservedPromptTokenCount = telemetryColumns.some(
@@ -156,6 +157,9 @@ function ensureCompactionTelemetryColumns(db: DatabaseSync): void {
   }
   if (!hasLastCacheTouchAt) {
     db.exec(`ALTER TABLE conversation_compaction_telemetry ADD COLUMN last_cache_touch_at TEXT`);
+  }
+  if (!hasCacheExpiresAt) {
+    db.exec(`ALTER TABLE conversation_compaction_telemetry ADD COLUMN cache_expires_at TEXT`);
   }
   if (!hasProvider) {
     db.exec(`ALTER TABLE conversation_compaction_telemetry ADD COLUMN provider TEXT`);
@@ -985,6 +989,7 @@ export function runLcmMigrations(
         CHECK (last_activity_band IN ('low', 'medium', 'high')),
       last_api_call_at TEXT,
       last_cache_touch_at TEXT,
+      cache_expires_at TEXT,
       provider TEXT,
       model TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))

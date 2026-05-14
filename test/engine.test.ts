@@ -10420,6 +10420,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       runtimeContext: {
         promptCache: {
           retention: "long",
+          expiresAt: 1_800_000_000_000,
           lastCallUsage: {
             input: 512,
             cacheRead: 1_024,
@@ -10446,6 +10447,7 @@ describe("LcmContextEngine fidelity and token budget", () => {
       lastObservedPromptTokenCount: 1_664,
       retention: "long",
     });
+    expect(telemetry?.cacheExpiresAt).toEqual(new Date(1_800_000_000_000));
     expect(telemetry?.lastObservedCacheHitAt).toBeInstanceOf(Date);
     expect(telemetry?.lastObservedCacheBreakAt).toBeNull();
     expect(debugLog).toHaveBeenCalledWith(
@@ -11100,6 +11102,87 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(decision.cacheState).toBe("hot");
     expect(debugLog).toHaveBeenCalledWith(
       expect.stringContaining("reason=hot-cache-budget-headroom"),
+    );
+  });
+
+  it("evaluateIncrementalCompaction treats elapsed explicit cache expiry as cold", async () => {
+    const debugLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      {
+        log: {
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+          debug: debugLog,
+        },
+      },
+    );
+    const sessionId = "incremental-explicit-expiry-cold";
+    const privateEngine = engine as unknown as {
+      compaction: {
+        evaluateLeafTrigger: (conversationId: number, leafChunkTokens?: number) => Promise<unknown>;
+        evaluate: (
+          conversationId: number,
+          tokenBudget: number,
+          observed?: number,
+        ) => Promise<unknown>;
+      };
+      evaluateIncrementalCompaction: (params: {
+        conversationId: number;
+        tokenBudget: number;
+        currentTokenCount?: number;
+      }) => Promise<{
+        shouldCompact: boolean;
+        cacheState: string;
+        maxPasses: number;
+      }>;
+    };
+
+    await engine.ingest({
+      sessionId,
+      message: makeMessage({ role: "user", content: "seed" }),
+    });
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+    await engine.getCompactionTelemetryStore().upsertConversationCompactionTelemetry({
+      conversationId: conversation!.conversationId,
+      cacheState: "hot",
+      lastObservedCacheRead: 8_192,
+      lastObservedPromptTokenCount: 16_384,
+      lastObservedCacheHitAt: new Date(),
+      lastCacheTouchAt: new Date(),
+      cacheExpiresAt: new Date(Date.now() - 1),
+      turnsSinceLeafCompaction: 1,
+      tokensAccumulatedSinceLeafCompaction: 55_000,
+      lastActivityBand: "low",
+    });
+
+    vi.spyOn(privateEngine.compaction, "evaluateLeafTrigger").mockImplementation(
+      async (_conversationId: number, leafChunkTokens?: number) => ({
+        shouldCompact: true,
+        rawTokensOutsideTail: 55_000,
+        threshold: leafChunkTokens ?? 20_000,
+      }),
+    );
+    vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
+      shouldCompact: false,
+      reason: "none",
+      currentTokens: 12_000,
+      threshold: 75_000,
+    });
+
+    const decision = await privateEngine.evaluateIncrementalCompaction({
+      conversationId: conversation!.conversationId,
+      tokenBudget: 100_000,
+      currentTokenCount: 12_000,
+    });
+
+    expect(decision.shouldCompact).toBe(true);
+    expect(decision.cacheState).toBe("cold");
+    expect(decision.maxPasses).toBe(2);
+    expect(debugLog).toHaveBeenCalledWith(
+      expect.stringContaining("reason=cold-cache-catchup"),
     );
   });
 

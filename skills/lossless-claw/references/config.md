@@ -441,6 +441,7 @@ Why it matters:
 
 - lets cache-safe deferred compaction stay conservative even when the host only knows that the turn was Anthropic-family, not the exact retention tier
 - keeps prompt-mutating debt pending until the cached prefix is likely cold
+- is only a fallback: explicit runtime `promptCache.expiresAt` telemetry is preferred when the host can provide it confidently
 
 Default:
 
