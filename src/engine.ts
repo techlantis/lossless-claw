@@ -65,7 +65,7 @@ import {
   type MessagePartRecord,
   type MessagePartType,
 } from "./store/conversation-store.js";
-import { SummaryStore } from "./store/summary-store.js";
+import { SummaryStore, type ContextItemRecord } from "./store/summary-store.js";
 import { createLcmSummarizeFromLegacyParams, LcmProviderAuthError } from "./summarize.js";
 import type { LcmDependencies, StartupSessionFileCandidate } from "./types.js";
 import { estimateTokens } from "./estimate-tokens.js";
@@ -89,6 +89,7 @@ type BootstrapImportObservation = {
 };
 
 const MAX_PREVIOUS_ASSEMBLED_SNAPSHOTS = 100;
+const CONTEXT_ENGINE_PROJECTION_EPOCH_VERSION = "summary-prefix-v1";
 type CircuitBreakerState = {
   failures: number;
   openSince: number | null;
@@ -157,6 +158,35 @@ type DeferredCompactionDebtDrainParams = {
   currentTokenCount?: number;
   reason: string;
 };
+
+function buildContextEngineProjectionEpoch(
+  conversationId: number,
+  contextItems: ContextItemRecord[],
+): string {
+  const hash = createHash("sha256");
+  hash.update(CONTEXT_ENGINE_PROJECTION_EPOCH_VERSION);
+  hash.update("\0");
+  hash.update(String(conversationId));
+
+  // Only summaries are part of the projection epoch. Raw tail growth is already
+  // visible to a live Codex backend thread, while summary changes represent a
+  // new compacted semantic prefix that must be bootstrapped into a fresh thread.
+  for (const item of contextItems) {
+    if (item.itemType !== "summary" || !item.summaryId) {
+      continue;
+    }
+    hash.update("\0");
+    hash.update(String(item.ordinal));
+    hash.update(":");
+    hash.update(item.summaryId);
+  }
+
+  return [
+    CONTEXT_ENGINE_PROJECTION_EPOCH_VERSION,
+    conversationId,
+    hash.digest("hex").slice(0, 32),
+  ].join(":");
+}
 
 function checkpointIsPastTranscriptEof(
   checkpoint: BootstrapCheckpointFileState | null | undefined,
@@ -2593,6 +2623,11 @@ export class LcmContextEngine implements ContextEngine {
 
   /** Run the actual compaction body without taking the per-session queue. */
   private async executeCompactionCore(params: CompactionExecutionParams): Promise<CompactResult> {
+    const startedAt = Date.now();
+    const sessionLabel = [
+      `session=${params.sessionId}`,
+      ...(params.sessionKey?.trim() ? [`sessionKey=${params.sessionKey.trim()}`] : []),
+    ].join(" ");
     const { force = false } = params;
     const legacyParams = asRecord(params.runtimeContext) ?? params.legacyParams;
     const lp = legacyParams ?? {};
@@ -2671,7 +2706,14 @@ export class LcmContextEngine implements ContextEngine {
         ? Math.max(1, targetTokens - observedRuntimeOverhead)
         : undefined;
 
+    this.deps.log.info(
+      `[lcm] compact: decision conversation=${conversationId} ${sessionLabel} compactionTarget=${params.compactionTarget ?? "budget"} force=${forceCompaction} tokenBudget=${tokenBudget} targetTokens=${targetTokens} storedTokens=${decisionStoredTokens} currentTokens=${decision.currentTokens} observedTokens=${observedTokens ?? "none"} observedRuntimeOverhead=${observedRuntimeOverhead} shouldCompact=${decision.shouldCompact}`,
+    );
+
     if (!forceCompaction && !decision.shouldCompact) {
+      this.deps.log.info(
+        `[lcm] compact: done conversation=${conversationId} ${sessionLabel} ok=true compacted=false reason=below_threshold tokensBefore=${decision.currentTokens} duration=${formatDurationMs(Date.now() - startedAt)}`,
+      );
       return {
         ok: true,
         compacted: false,
@@ -2726,23 +2768,27 @@ export class LcmContextEngine implements ContextEngine {
       const sweepOk =
         !sweepResult.authFailure &&
         (isUnderTargetAfterSweep || (sweepResult.actionTaken && !isThresholdSweep));
+      const sweepReason = sweepResult.authFailure
+        ? (sweepResult.actionTaken
+            ? "provider auth failure after partial compaction"
+            : "provider auth failure")
+        : thresholdSweepStillOverTarget
+          ? "compacted but still over target"
+        : sweepResult.actionTaken
+          ? "compacted"
+          : isUnderTargetAfterSweep
+            ? "already under target"
+            : manualCompactionRequested
+              ? "nothing to compact"
+              : "live context still exceeds target";
+      this.deps.log.info(
+        `[lcm] compact: done conversation=${conversationId} ${sessionLabel} ok=${sweepOk} compacted=${sweepResult.actionTaken} reason=${sweepReason.replaceAll(" ", "_")} tokensBefore=${decision.currentTokens} tokensAfter=${sweepResult.tokensAfter} createdSummaryId=${sweepResult.createdSummaryId ?? "none"} duration=${formatDurationMs(Date.now() - startedAt)}`,
+      );
 
       return {
         ok: sweepOk,
         compacted: sweepResult.actionTaken,
-        reason: sweepResult.authFailure
-          ? (sweepResult.actionTaken
-              ? "provider auth failure after partial compaction"
-              : "provider auth failure")
-          : thresholdSweepStillOverTarget
-            ? "compacted but still over target"
-          : sweepResult.actionTaken
-            ? "compacted"
-            : isUnderTargetAfterSweep
-              ? "already under target"
-              : manualCompactionRequested
-                ? "nothing to compact"
-                : "live context still exceeds target",
+        reason: sweepReason,
         result: {
           tokensBefore: decision.currentTokens,
           tokensAfter: sweepResult.tokensAfter,
@@ -2797,18 +2843,23 @@ export class LcmContextEngine implements ContextEngine {
       await this.markLeafCompactionTelemetrySuccess({ conversationId });
     }
 
+    const compactUntilReason = compactResult.authFailure
+      ? (didCompact
+          ? "provider auth failure after partial compaction"
+          : "provider auth failure")
+      : compactResult.success
+        ? didCompact
+          ? "compacted"
+          : "already under target"
+        : "could not reach target";
+    this.deps.log.info(
+      `[lcm] compact: done conversation=${conversationId} ${sessionLabel} ok=${compactResult.success} compacted=${didCompact} reason=${compactUntilReason.replaceAll(" ", "_")} tokensBefore=${decision.currentTokens} tokensAfter=${compactResult.finalTokens} rounds=${compactResult.rounds} duration=${formatDurationMs(Date.now() - startedAt)}`,
+    );
+
     return {
       ok: compactResult.success,
       compacted: didCompact,
-      reason: compactResult.authFailure
-        ? (didCompact
-            ? "provider auth failure after partial compaction"
-            : "provider auth failure")
-        : compactResult.success
-          ? didCompact
-            ? "compacted"
-            : "already under target"
-          : "could not reach target",
+      reason: compactUntilReason,
       result: {
         tokensBefore: decision.currentTokens,
         tokensAfter: compactResult.finalTokens,
@@ -6041,8 +6092,13 @@ export class LcmContextEngine implements ContextEngine {
       const stubStatsLog = assembled.debug?.stubStats
         ? ` stubbed=${assembled.debug.stubStats.stubbedCount} tokensSaved=${assembled.debug.stubStats.tokensSaved}`
         : "";
+      const contextProjectionEpoch = buildContextEngineProjectionEpoch(
+        conversation.conversationId,
+        contextItems,
+      );
+      const summaryContextItems = contextItems.filter((item) => item.itemType === "summary").length;
       this.deps.log.info(
-        `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} hasSummaryItems=${hasSummaryItems} inputMessages=${params.messages.length} outputMessages=${assembled.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${assembled.estimatedTokens}${stubStatsLog} duration=${formatDurationMs(Date.now() - startedAt)}`,
+        `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} summaryContextItems=${summaryContextItems} hasSummaryItems=${hasSummaryItems} inputMessages=${params.messages.length} outputMessages=${assembled.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${assembled.estimatedTokens} contextProjectionMode=thread_bootstrap contextProjectionEpoch=${contextProjectionEpoch}${stubStatsLog} duration=${formatDurationMs(Date.now() - startedAt)}`,
       );
       const prefixChange = describeAssembledPrefixChange(
         this.getPreviousAssembledSnapshot(conversation.conversationId),
@@ -6077,6 +6133,10 @@ export class LcmContextEngine implements ContextEngine {
       const result: AssembleResult = {
         messages: assembled.messages,
         estimatedTokens: assembled.estimatedTokens,
+        contextProjection: {
+          mode: "thread_bootstrap",
+          epoch: contextProjectionEpoch,
+        },
       };
       return result;
     } catch (err) {
@@ -6130,6 +6190,9 @@ export class LcmContextEngine implements ContextEngine {
     force?: boolean;
   }): Promise<CompactResult> {
     if (this.shouldIgnoreSession({ sessionId: params.sessionId, sessionKey: params.sessionKey })) {
+      this.deps.log.info(
+        `[lcm] compact: skipped session=${params.sessionId}${params.sessionKey?.trim() ? ` sessionKey=${params.sessionKey.trim()}` : ""} reason=session_excluded`,
+      );
       return {
         ok: true,
         compacted: false,
@@ -6137,6 +6200,9 @@ export class LcmContextEngine implements ContextEngine {
       };
     }
     if (this.isStatelessSession(params.sessionKey)) {
+      this.deps.log.info(
+        `[lcm] compact: skipped session=${params.sessionId}${params.sessionKey?.trim() ? ` sessionKey=${params.sessionKey.trim()}` : ""} reason=stateless_session`,
+      );
       return {
         ok: true,
         compacted: false,
@@ -6152,6 +6218,9 @@ export class LcmContextEngine implements ContextEngine {
           sessionKey: params.sessionKey,
         });
         if (!conversation) {
+          this.deps.log.info(
+            `[lcm] compact: skipped session=${params.sessionId}${params.sessionKey?.trim() ? ` sessionKey=${params.sessionKey.trim()}` : ""} reason=no_conversation_found`,
+          );
           return {
             ok: true,
             compacted: false,
