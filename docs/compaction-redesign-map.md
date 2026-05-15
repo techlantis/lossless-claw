@@ -102,9 +102,9 @@ Relevant code:
 The sweep has two phases:
 
 1. Leaf phase: repeatedly summarize the oldest raw chunks outside the fresh tail.
-2. Condensed phase: repeatedly summarize same-depth summary chunks, shallowest first.
+2. Condensed phase: if summarized-prefix tokens exceed `summaryPrefixTargetTokens`, repeatedly summarize same-depth summary chunks, shallowest first.
 
-Routine threshold sweeps stop once they get under the computed threshold and summarized-prefix target. Forced sweeps still stop when no eligible chunk remains or when a pass stops making token progress.
+Routine threshold sweeps use `contextThreshold` to decide when to start compaction. Once started, the leaf phase runs until no eligible raw-message chunk remains outside the fresh tail. Condensation is controlled by `summaryPrefixTargetTokens`, not by total context pressure. Forced sweeps still stop when no eligible chunk remains or when a pass stops making token progress.
 
 `sweepMaxDepth` is the preferred source-depth cap for routine full-sweep condensation:
 
@@ -113,7 +113,7 @@ Routine threshold sweeps stop once they get under the computed threshold and sum
 - `2`: depth 0 -> 1 and depth 1 -> 2 are allowed
 - `-1`: unlimited
 
-The cap is intentionally aspirational. If a sweep that obeys `sweepMaxDepth` still leaves the conversation over `contextThreshold`, or if summary tokens outside the fresh tail exceed `summaryPrefixTargetTokens`, Lossless runs a pressure condensation phase that may go deeper using `condensedMinFanoutHard`.
+The cap is intentionally aspirational. If summary tokens outside the fresh tail exceed `summaryPrefixTargetTokens` after routine condensation, Lossless runs a pressure condensation phase that may go deeper using `condensedMinFanoutHard`.
 
 Relevant code:
 

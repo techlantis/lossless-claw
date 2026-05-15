@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import type { ConversationStore, CreateMessagePartInput } from "./store/conversation-store.js";
+import { contentFromParts } from "./assembler.js";
+import type {
+  ConversationStore,
+  CreateMessagePartInput,
+  MessagePartRecord,
+  MessageRecord,
+  MessageRole,
+} from "./store/conversation-store.js";
 import type { SummaryStore, SummaryRecord, ContextItemRecord } from "./store/summary-store.js";
 import { estimateTokens, truncateTextToEstimatedTokens } from "./estimate-tokens.js";
 import { extractFileIdsFromContent } from "./large-files.js";
@@ -198,7 +205,21 @@ const MEDIA_ATTACHMENT_PART_TYPES = new Set(["file", "snapshot"]);
 const MEDIA_ATTACHMENT_RAW_TYPES = new Set(["file", "image", "snapshot"]);
 const PROVIDER_REASONING_RAW_TYPES = new Set(["reasoning", "thinking"]);
 const STRUCTURED_MEDIA_TEXT_KEYS = ["text", "caption", "alt", "title", "summary"] as const;
-const STRUCTURED_MEDIA_NESTED_KEYS = ["content", "parts", "items", "message", "messages"] as const;
+const STRUCTURED_MEDIA_NESTED_KEYS = [
+  "content",
+  "parts",
+  "items",
+  "message",
+  "messages",
+  "input",
+  "arguments",
+  "output",
+  "result",
+  "results",
+  "data",
+  "query",
+  "command",
+] as const;
 
 const CONDENSED_MIN_INPUT_RATIO = 0.1;
 
@@ -336,6 +357,74 @@ function extractMeaningfulMessageText(content: string): string {
     }
   }
   return stripEmbeddedMediaPayloads(content);
+}
+
+/** Map stored message roles back to runtime roles for structured reconstruction. */
+function runtimeRoleForSummary(role: MessageRole): "user" | "assistant" | "toolResult" {
+  if (role === "tool") {
+    return "toolResult";
+  }
+  if (role === "user" || role === "system") {
+    return "user";
+  }
+  return "assistant";
+}
+
+/** Parse JSON-ish message-part values while preserving plain text values. */
+function parseStoredPartValue(value: string | null | undefined): unknown {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return trimmed;
+  }
+}
+
+/** Extract summarizable text from a structured runtime content value. */
+function extractMeaningfulStructuredText(value: unknown): string {
+  if (typeof value === "string") {
+    return extractMeaningfulMessageText(value);
+  }
+  const extracted = extractSanitizedStructuredText(value)
+    .map((fragment) => fragment.trim())
+    .filter(Boolean);
+  if (extracted.length > 0) {
+    return extracted.join("\n").trim();
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? extractMeaningfulMessageText(serialized) : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Extract a readable fallback from one structured message part. */
+function extractMessagePartSummaryText(part: MessagePartRecord): string {
+  const sections: string[] = [];
+  const text = extractMeaningfulStructuredText(part.textContent);
+  if (text) {
+    sections.push(text);
+  }
+
+  const toolName = part.toolName?.trim();
+  const toolLabel = toolName ? ` (${toolName})` : "";
+  const input = extractMeaningfulStructuredText(parseStoredPartValue(part.toolInput));
+  if (input) {
+    sections.push(`Tool input${toolLabel}:\n${input}`);
+  }
+  const output = extractMeaningfulStructuredText(parseStoredPartValue(part.toolOutput));
+  if (output) {
+    sections.push(`Tool output${toolLabel}:\n${output}`);
+  }
+
+  return sections.join("\n\n").trim();
 }
 
 /** Identify whether a stored message part represents a media attachment. */
@@ -716,10 +805,6 @@ export class CompactionEngine {
       previousSummaryContent = leafResult.content;
       runningTokens = passTokensAfter;
 
-      if (!force && passTokensAfter <= threshold) {
-        previousTokens = passTokensAfter;
-        break;
-      }
       if (passTokensAfter >= passTokensBefore || passTokensAfter >= previousTokens) {
         break;
       }
@@ -786,7 +871,7 @@ export class CompactionEngine {
       return "progress";
     };
 
-    while (force || previousTokens > threshold || await hasSummaryPrefixPressure()) {
+    while (await hasSummaryPrefixPressure()) {
       const status = await runCondensationPass({
         enforcePreferredDepth: true,
         useHardFanout: hardTrigger === true,
@@ -802,7 +887,7 @@ export class CompactionEngine {
     while (
       !hadAuthFailure &&
       !stoppedForNoProgress &&
-      (previousTokens > threshold || await hasSummaryPrefixPressure())
+      await hasSummaryPrefixPressure()
     ) {
       const status = await runCondensationPass({
         enforcePreferredDepth: false,
@@ -1535,8 +1620,9 @@ export class CompactionEngine {
   private async annotateMediaContent(
     messageId: number,
     content: string,
+    preloadedParts?: MessagePartRecord[],
   ): Promise<string> {
-    const parts = await this.conversationStore.getMessageParts(messageId);
+    const parts = preloadedParts ?? (await this.conversationStore.getMessageParts(messageId));
     const hasMediaParts = parts.some((part) => isMediaAttachmentPart(part));
     if (!hasMediaParts) {
       return content;
@@ -1562,6 +1648,48 @@ export class CompactionEngine {
     return `${meaningfulText} [with media attachment]`;
   }
 
+  /**
+   * Reconstruct the text used by leaf summaries from stored message data.
+   *
+   * Plain `messages.content` is preferred when present, but structured tool
+   * calls/results often store their actual payload in `message_parts` while the
+   * fallback content column is empty. Rehydrating through the assembler helper
+   * keeps compaction aligned with the prompt assembly path.
+   */
+  private async resolveLeafSummaryMessageContent(msg: MessageRecord): Promise<string> {
+    const parts = await this.conversationStore.getMessageParts(msg.messageId);
+    const annotatedContent = await this.annotateMediaContent(
+      msg.messageId,
+      msg.content,
+      parts,
+    );
+    const storedText = extractMeaningfulMessageText(annotatedContent);
+    if (storedText) {
+      return storedText;
+    }
+
+    if (parts.length === 0) {
+      return "";
+    }
+
+    const rehydrated = contentFromParts(
+      parts.map((part) => ({ ...part })),
+      runtimeRoleForSummary(msg.role),
+      msg.content,
+    );
+    const rehydratedText = extractMeaningfulStructuredText(rehydrated);
+    if (rehydratedText) {
+      return rehydratedText;
+    }
+
+    return parts
+      .map(extractMessagePartSummaryText)
+      .map((text) => text.trim())
+      .filter(Boolean)
+      .join("\n\n")
+      .trim();
+  }
+
   // ── Private: Leaf Pass ───────────────────────────────────────────────────
 
   /**
@@ -1583,13 +1711,9 @@ export class CompactionEngine {
       }
       const msg = await this.conversationStore.getMessageById(item.messageId);
       if (msg) {
-        const annotatedContent = await this.annotateMediaContent(
-          msg.messageId,
-          msg.content,
-        );
         messageContents.push({
           messageId: msg.messageId,
-          content: annotatedContent,
+          content: await this.resolveLeafSummaryMessageContent(msg),
           createdAt: msg.createdAt,
           tokenCount: this.resolveMessageTokenCount(msg),
         });

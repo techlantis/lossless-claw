@@ -427,13 +427,13 @@ func buildSummaryRewriteSource(ctx context.Context, q sqlQueryer, item rewriteSu
 }
 
 func buildLeafRewriteSource(ctx context.Context, q sqlQueryer, summaryID string, includeTimestamps bool, loc *time.Location) (rewriteSource, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT m.role, COALESCE(m.content, ''), COALESCE(m.created_at, '')
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
+		SELECT m.role, %s AS content, COALESCE(m.created_at, '')
 		FROM summary_messages sm
 		JOIN messages m ON m.message_id = sm.message_id
 		WHERE sm.summary_id = ?
 		ORDER BY sm.ordinal ASC
-	`, summaryID)
+	`, messageDisplayContentSQL("m")), summaryID)
 	if err != nil {
 		return rewriteSource{}, fmt.Errorf("query leaf source for %s: %w", summaryID, err)
 	}

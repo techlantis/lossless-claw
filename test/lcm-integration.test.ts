@@ -1426,6 +1426,85 @@ describe("LCM integration: compaction", () => {
     expect(capturedSourceText).toContain("A plain user message.");
   });
 
+  it("leaf compaction summarizes structured message parts when stored content is empty", async () => {
+    const structuredPartEngine = new CompactionEngine(convStore as any, sumStore as any, {
+      ...defaultCompactionConfig,
+      freshTailCount: 0,
+      leafChunkTokens: 1_000,
+    });
+    await convStore.createConversation({ sessionId: "structured-parts-session" });
+
+    const assistant = await convStore.createMessage({
+      conversationId: CONV_ID,
+      seq: 1,
+      role: "assistant",
+      content: "",
+      tokenCount: 120,
+    });
+    await convStore.createMessageParts(assistant.messageId, [
+      {
+        sessionId: "structured-parts-session",
+        partType: "tool",
+        ordinal: 0,
+        toolName: "supabase.execute_sql",
+        toolInput: JSON.stringify({
+          query: "select name from companies where status = 'active'",
+        }),
+        metadata: JSON.stringify({
+          originalRole: "assistant",
+          rawType: "function_call",
+        }),
+      },
+    ]);
+    await sumStore.appendContextMessage(CONV_ID, assistant.messageId);
+
+    const toolResult = await convStore.createMessage({
+      conversationId: CONV_ID,
+      seq: 2,
+      role: "tool",
+      content: "",
+      tokenCount: 400,
+    });
+    await convStore.createMessageParts(toolResult.messageId, [
+      {
+        sessionId: "structured-parts-session",
+        partType: "tool",
+        ordinal: 0,
+        textContent: JSON.stringify({
+          content: [{ type: "text", text: "Active company: Acme Robotics" }],
+        }),
+        metadata: JSON.stringify({
+          originalRole: "toolResult",
+          rawType: "function_call_output",
+        }),
+      },
+    ]);
+    await sumStore.appendContextMessage(CONV_ID, toolResult.messageId);
+
+    let capturedSourceText = "";
+    const summarize = vi.fn(async (text: string) => {
+      capturedSourceText = text;
+      return "Structured parts summary.";
+    });
+
+    const result = await structuredPartEngine.compactLeaf({
+      conversationId: CONV_ID,
+      tokenBudget: 10_000,
+      summarize,
+      force: true,
+    });
+
+    expect(result.actionTaken).toBe(true);
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(capturedSourceText).toContain("select name from companies");
+    expect(capturedSourceText).toContain("Active company: Acme Robotics");
+
+    const leafSummary = sumStore._summaries.find((summary) => summary.kind === "leaf");
+    expect(leafSummary?.content).toBe("Structured parts summary.");
+    expect(leafSummary?.content).not.toContain("[Truncated from 0 tokens]");
+    expect(leafSummary?.sourceMessageTokenCount).toBe(520);
+  });
+
   it("leaf-trigger accounting respects fresh tail token caps", async () => {
     const tokenAwareEngine = new CompactionEngine(convStore as any, sumStore as any, {
       ...defaultCompactionConfig,
@@ -1889,6 +1968,7 @@ describe("LCM integration: compaction", () => {
       leafChunkTokens: 200,
       condensedTargetTokens: 10,
       sweepMaxDepth: 1,
+      summaryPrefixTargetTokens: 100,
     });
     await seedLeafSummaries(sumStore, "sum_sweep_depth_one");
 
@@ -1918,6 +1998,41 @@ describe("LCM integration: compaction", () => {
     expect(
       sumStore._summaries.some((summary) => summary.kind === "condensed" && summary.depth === 1),
     ).toBe(true);
+  });
+
+  it("compactFullSweep runs leaf phase until no eligible raw chunks remain", async () => {
+    const sweepEngine = new CompactionEngine(convStore as any, sumStore as any, {
+      ...defaultCompactionConfig,
+      contextThreshold: 0.75,
+      freshTailCount: 2,
+      leafChunkTokens: 400,
+      leafTargetTokens: 20,
+      condensedMinFanout: 2,
+      condensedMinFanoutHard: 2,
+      sweepMaxDepth: 1,
+      summaryPrefixTargetTokens: 10_000,
+    });
+
+    await ingestMessages(convStore, sumStore, 10, {
+      contentFn: (i) => `Message ${i} with enough text to summarize.`,
+      tokenCountFn: () => 200,
+    });
+
+    let leafIndex = 0;
+    const summarize = vi.fn(async () => `Leaf summary ${++leafIndex}`);
+    const result = await sweepEngine.compactFullSweep({
+      conversationId: CONV_ID,
+      tokenBudget: 2_500,
+      summarize,
+    });
+
+    expect(result.actionTaken).toBe(true);
+    expect(summarize).toHaveBeenCalledTimes(4);
+    expect(sumStore._summaries.filter((summary) => summary.kind === "leaf")).toHaveLength(4);
+
+    const contextItems = await sumStore.getContextItems(CONV_ID);
+    expect(contextItems.filter((item) => item.itemType === "message")).toHaveLength(2);
+    expect(contextItems.filter((item) => item.itemType === "summary")).toHaveLength(4);
   });
 
   it("compactFullSweep pressure-condenses beyond sweepMaxDepth when summary prefix exceeds target", async () => {
@@ -1974,10 +2089,10 @@ describe("LCM integration: compaction", () => {
     ).toBe(true);
   });
 
-  it("compactFullSweep pressure-condenses beyond sweepMaxDepth when still over threshold", async () => {
+  it("compactFullSweep does not pressure-condense for total-threshold pressure alone", async () => {
     const pressureEngine = new CompactionEngine(convStore as any, sumStore as any, {
       ...defaultCompactionConfig,
-      freshTailCount: 0,
+      freshTailCount: 2,
       condensedMinFanout: 4,
       condensedMinFanoutHard: 2,
       leafChunkTokens: 500,
@@ -1999,6 +2114,10 @@ describe("LCM integration: compaction", () => {
       });
       await sumStore.appendContextSummary(CONV_ID, summaryId);
     }
+    await ingestMessages(convStore, sumStore, 2, {
+      contentFn: (i) => `Fresh tail message ${i}`,
+      tokenCountFn: () => 1_000,
+    });
 
     const summarize = vi.fn(async () => "Depth two threshold pressure summary");
     const result = await pressureEngine.compactFullSweep({
@@ -2007,11 +2126,12 @@ describe("LCM integration: compaction", () => {
       summarize,
     });
 
-    expect(result.actionTaken).toBe(true);
-    expect(result.condensed).toBe(true);
+    expect(result.actionTaken).toBe(false);
+    expect(result.condensed).toBe(false);
+    expect(summarize).not.toHaveBeenCalled();
     expect(
       sumStore._summaries.some((summary) => summary.kind === "condensed" && summary.depth === 2),
-    ).toBe(true);
+    ).toBe(false);
   });
 
 
@@ -2093,6 +2213,7 @@ describe("LCM integration: compaction", () => {
       leafChunkTokens: 100,
       condensedTargetTokens: 10,
       incrementalMaxDepth: 1,
+      summaryPrefixTargetTokens: 1,
     });
 
     await convStore.createConversation({ sessionId: "leaf-condensed-session" });
@@ -2191,7 +2312,7 @@ describe("LCM integration: compaction", () => {
       leafChunkTokens: 200,
       condensedTargetTokens: 10,
       incrementalMaxDepth: 1,
-      summaryPrefixTargetTokens: 1_000,
+      summaryPrefixTargetTokens: 150,
     });
 
     await convStore.createConversation({ sessionId: "depth-break-session" });
@@ -2454,7 +2575,7 @@ describe("LCM integration: compaction", () => {
     expect(depthZeroCall?.options?.previousSummary).toContain("Depth zero prior context");
   });
 
-  it("enforces fanout thresholds and only relaxes them in hard-trigger mode", async () => {
+  it("relaxes fanout thresholds only under summarized-prefix pressure", async () => {
     const depthAwareEngine = new CompactionEngine(convStore as any, sumStore as any, {
       ...defaultCompactionConfig,
       leafMinFanout: 3,
@@ -2495,14 +2616,23 @@ describe("LCM integration: compaction", () => {
     });
     expect(normalResult.actionTaken).toBe(false);
 
-    const hardResult = await depthAwareEngine.compactFullSweep({
+    const pressureEngine = new CompactionEngine(convStore as any, sumStore as any, {
+      ...defaultCompactionConfig,
+      leafMinFanout: 3,
+      condensedMinFanout: 4,
+      condensedMinFanoutHard: 2,
+      leafChunkTokens: 200,
+      condensedTargetTokens: 10,
+      incrementalMaxDepth: 1,
+      summaryPrefixTargetTokens: 100,
+    });
+    const pressureResult = await pressureEngine.compactFullSweep({
       conversationId: CONV_ID,
       tokenBudget: 500,
       summarize,
       force: true,
-      hardTrigger: true,
     });
-    expect(hardResult.actionTaken).toBe(true);
+    expect(pressureResult.actionTaken).toBe(true);
   });
 
   it("keeps condensed parents at uniform depth across interleaved sweeps", async () => {
@@ -3429,11 +3559,11 @@ describe("LCM integration: full round-trip", () => {
       leafChunkTokens: 100,
       condensedTargetTokens: 10,
       incrementalMaxDepth: 1,
+      summaryPrefixTargetTokens: 1,
     });
 
-    // Ingest 12 messages with substantial content so that after the leaf pass,
-    // the remaining context (1 small summary + 4 fresh messages) still exceeds
-    // the threshold, forcing the condensed pass to run on the second round.
+    // Ingest 12 messages with substantial content so that leaf exhaustion
+    // creates enough summary-prefix pressure to force a condensed pass.
     await ingestMessages(convStore, sumStore, 12, {
       contentFn: (i) => `Turn ${i}: ${"z".repeat(200)}`,
       tokenCountFn: (_i, content) => estimateTokens(content),
@@ -3446,12 +3576,9 @@ describe("LCM integration: full round-trip", () => {
     });
 
     // First compaction with a tight budget.
-    // 12 messages at ~52 tokens each = ~624 total tokens.
-    // With budget=200, threshold=150. The leaf pass compacts the 8 oldest
-    // messages into a ~5-token summary. After leaf pass:
-    //   context = 1 summary (~5 tok) + 4 fresh messages (~208 tok) = ~213 tok
-    // 213 > 150 (threshold), so the condensed pass also runs, creating
-    // a condensed summary from the leaf. Result: 2 summaries in the store.
+    // 12 messages at ~52 tokens each = ~624 total tokens. The leaf phase
+    // compacts all 8 messages outside the fresh tail, and the low
+    // summaryPrefixTargetTokens setting makes phase 2 condense those leaves.
     const round1 = await condensedFriendlyEngine.compact({
       conversationId: CONV_ID,
       tokenBudget: 200,

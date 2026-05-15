@@ -476,6 +476,37 @@ func loadConversationWindowAfter(dbPath string, conversationID, afterMessageID i
 	return loadConversationWindow(dbPath, conversationID, limit, "after", afterMessageID)
 }
 
+// messageDisplayContentSQL returns SQL that shows message_parts content when
+// the canonical messages.content preview is empty.
+func messageDisplayContentSQL(messageAlias string) string {
+	return fmt.Sprintf(`
+		CASE
+			WHEN TRIM(COALESCE(%[1]s.content, '')) != '' THEN COALESCE(%[1]s.content, '')
+			ELSE COALESCE((
+				SELECT group_concat(part_text, char(10) || char(10))
+				FROM (
+					SELECT TRIM(
+						COALESCE(mp.text_content, '') ||
+						CASE
+							WHEN TRIM(COALESCE(mp.tool_input, '')) != ''
+								THEN char(10) || 'Tool input: ' || mp.tool_input
+							ELSE ''
+						END ||
+						CASE
+							WHEN TRIM(COALESCE(mp.tool_output, '')) != ''
+								THEN char(10) || 'Tool output: ' || mp.tool_output
+							ELSE ''
+						END
+					) AS part_text
+					FROM message_parts mp
+					WHERE mp.message_id = %[1]s.message_id
+					ORDER BY mp.ordinal
+				)
+				WHERE TRIM(part_text) != ''
+			), '')
+		END`, messageAlias)
+}
+
 // loadConversationWindow executes one keyset-paged message query and computes paging boundaries.
 func loadConversationWindow(dbPath string, conversationID int64, limit int, mode string, cursorMessageID int64) (conversationWindowPage, error) {
 	if conversationID <= 0 {
@@ -491,26 +522,26 @@ func loadConversationWindow(dbPath string, conversationID int64, limit int, mode
 	}
 	defer db.Close()
 
-	baseQuery := `
-		SELECT message_id, role, content, created_at
-		FROM messages
-		WHERE conversation_id = ?
-	`
+	baseQuery := fmt.Sprintf(`
+		SELECT m.message_id, m.role, %s AS content, m.created_at
+		FROM messages m
+		WHERE m.conversation_id = ?
+	`, messageDisplayContentSQL("m"))
 	args := []any{conversationID}
-	orderClause := "ORDER BY message_id ASC"
+	orderClause := "ORDER BY m.message_id ASC"
 	reverse := false
 
 	switch mode {
 	case "latest":
-		orderClause = "ORDER BY message_id DESC"
+		orderClause = "ORDER BY m.message_id DESC"
 		reverse = true
 	case "before":
-		baseQuery += " AND message_id < ?"
+		baseQuery += " AND m.message_id < ?"
 		args = append(args, cursorMessageID)
-		orderClause = "ORDER BY message_id DESC"
+		orderClause = "ORDER BY m.message_id DESC"
 		reverse = true
 	case "after":
-		baseQuery += " AND message_id > ?"
+		baseQuery += " AND m.message_id > ?"
 		args = append(args, cursorMessageID)
 	case "":
 		return conversationWindowPage{}, fmt.Errorf("missing conversation window mode")
@@ -1282,7 +1313,7 @@ func loadContextItems(dbPath, sessionID string) ([]contextItemEntry, error) {
 		return nil, err
 	}
 
-	rows, err := db.Query(`
+	rows, err := db.Query(fmt.Sprintf(`
 		SELECT
 			ci.ordinal,
 			ci.item_type,
@@ -1302,7 +1333,7 @@ func loadContextItems(dbPath, sessionID string) ([]contextItemEntry, error) {
 			END AS token_count,
 			CASE
 				WHEN ci.item_type = 'summary' THEN COALESCE(s.content, '')
-				ELSE COALESCE(m.content, '')
+				ELSE %s
 			END AS content,
 			CASE
 				WHEN ci.item_type = 'summary' THEN COALESCE(s.created_at, '')
@@ -1313,7 +1344,7 @@ func loadContextItems(dbPath, sessionID string) ([]contextItemEntry, error) {
 		LEFT JOIN messages m ON ci.message_id = m.message_id
 		WHERE ci.conversation_id = ?
 		ORDER BY ci.ordinal
-	`, conversationID)
+	`, messageDisplayContentSQL("m")), conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("query context items for conversation %d: %w", conversationID, err)
 	}
