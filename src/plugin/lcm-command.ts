@@ -682,6 +682,11 @@ async function buildStatusText(params: {
       params.db,
       current.stats.conversationId,
     );
+    const focusLines = await buildFocusSummaryLines({
+      store: new FocusBriefStore(params.db),
+      conversationId: current.stats.conversationId,
+      timezone: params.config.timezone,
+    });
     const formatMaintenanceTime = (value: Date | null): string =>
       value ? formatTimestamp(value, params.config.timezone) : "never";
     lines.push(
@@ -711,6 +716,7 @@ async function buildStatusText(params: {
         ),
       ]),
     );
+    lines.push("", buildSection("🎯 Focus", focusLines));
     lines.push(
       "",
       buildSection("🛠️ Maintenance", [
@@ -1177,6 +1183,58 @@ function formatFocusBriefTime(value: Date | null, timezone: string): string {
   return value ? formatTimestamp(value, timezone) : "unknown";
 }
 
+function formatFocusDelta(diagnostics: {
+  postFocusMessageCount: number;
+  postFocusSummaryCount: number;
+  postFocusTokenCount: number;
+}): string {
+  return [
+    `${formatNumber(diagnostics.postFocusMessageCount)} messages`,
+    `${formatNumber(diagnostics.postFocusSummaryCount)} summaries`,
+    `~${formatNumber(diagnostics.postFocusTokenCount)} tokens`,
+  ].join(", ");
+}
+
+async function buildFocusSummaryLines(params: {
+  store: FocusBriefStore;
+  conversationId: number;
+  timezone: string;
+}): Promise<string[]> {
+  const active = await params.store.getActiveFocusBrief(params.conversationId);
+  const latest = await params.store.getLatestFocusBrief(params.conversationId);
+  if (!active) {
+    return [
+      buildStatLine("status", "none"),
+      ...(latest
+        ? [
+            buildStatLine("latest generation", latest.status),
+            buildStatLine("latest brief id", formatCommand(latest.briefId)),
+          ]
+        : []),
+    ];
+  }
+
+  const diagnostics = await params.store.getFocusBriefDiagnostics(active);
+  const lines = [
+    buildStatLine("status", "active"),
+    buildStatLine("brief id", formatCommand(active.briefId)),
+    buildStatLine("created", formatFocusBriefTime(active.createdAt, params.timezone)),
+    buildStatLine("prompt", JSON.stringify(formatFocusPreview(active.prompt, 160))),
+    buildStatLine("tokens", `${formatNumber(active.tokenCount)} / ${formatNumber(active.targetTokens)}`),
+    buildStatLine("delta since focus", formatFocusDelta(diagnostics)),
+    buildStatLine("stale", formatBoolean(diagnostics.stale)),
+    buildStatLine("truncated", formatBoolean(diagnostics.truncated)),
+    buildStatLine("source snapshot", diagnostics.sourceContextChanged ? "obsolete" : "current"),
+  ];
+  if (latest && latest.briefId !== active.briefId) {
+    lines.push(buildStatLine("latest generation", latest.status));
+    if (latest.error) {
+      lines.push(buildStatLine("latest error", latest.error));
+    }
+  }
+  return lines;
+}
+
 // Build the read-only status response for the current conversation's latest focus brief.
 async function buildFocusStatusText(params: {
   ctx: PluginCommandContext;
@@ -1201,6 +1259,7 @@ async function buildFocusStatusText(params: {
   }
 
   const store = new FocusBriefStore(params.db);
+  const active = await store.getActiveFocusBrief(current.stats.conversationId);
   const latest = await store.getLatestFocusBrief(current.stats.conversationId);
   lines.push(
     buildSection("📍 Current conversation", [
@@ -1213,7 +1272,7 @@ async function buildFocusStatusText(params: {
     "",
   );
 
-  if (!latest) {
+  if (!active && !latest) {
     lines.push(
       buildSection("🎯 Focus", [
         buildStatLine("status", "none"),
@@ -1224,26 +1283,45 @@ async function buildFocusStatusText(params: {
     return lines.join("\n");
   }
 
-  const sources = await store.getFocusBriefSources(latest.briefId);
+  const primary = active ?? latest;
+  if (!primary) {
+    return lines.join("\n");
+  }
+
+  const sources = await store.getFocusBriefSources(primary.briefId);
   const cited = sources.filter((source) => source.role === "cited").map((source) => source.summaryId);
+  const diagnostics = await store.getFocusBriefDiagnostics(primary);
   lines.push(
-    buildSection("🎯 Latest focus brief", [
-      buildStatLine("brief id", formatCommand(latest.briefId)),
-      buildStatLine("status", latest.status),
-      buildStatLine("created", formatFocusBriefTime(latest.createdAt, params.config.timezone)),
-      buildStatLine("prompt", JSON.stringify(formatFocusPreview(latest.prompt, 240))),
-      buildStatLine("tokens", formatNumber(latest.tokenCount)),
-      buildStatLine("target tokens", formatNumber(latest.targetTokens)),
+    buildSection(active ? "🎯 Active focus brief" : "🎯 Latest focus brief", [
+      buildStatLine("brief id", formatCommand(primary.briefId)),
+      buildStatLine("status", primary.status),
+      buildStatLine("created", formatFocusBriefTime(primary.createdAt, params.config.timezone)),
+      buildStatLine("prompt", JSON.stringify(formatFocusPreview(primary.prompt, 240))),
+      buildStatLine("tokens", formatNumber(primary.tokenCount)),
+      buildStatLine("target tokens", formatNumber(primary.targetTokens)),
       buildStatLine("source summaries", formatNumber(sources.filter((source) => source.role === "active_input").length)),
       buildStatLine("cited summaries", cited.length > 0 ? cited.slice(0, 8).join(", ") : "none"),
-      buildStatLine("generator run", latest.generatorRunId ?? "unknown"),
+      buildStatLine("generator run", primary.generatorRunId ?? "unknown"),
+      buildStatLine("delta since focus", formatFocusDelta(diagnostics)),
+      buildStatLine("stale", formatBoolean(diagnostics.stale)),
+      buildStatLine("truncated", formatBoolean(diagnostics.truncated)),
+      buildStatLine("source snapshot", diagnostics.sourceContextChanged ? "obsolete" : "current"),
     ]),
   );
-  if (latest.error) {
-    lines.push("", buildSection("⚠️ Error", [latest.error]));
+  if (latest && active && latest.briefId !== active.briefId) {
+    lines.push(
+      "",
+      buildSection("⚠️ Latest generation", [
+        buildStatLine("latest generation", latest.status),
+        buildStatLine("brief id", formatCommand(latest.briefId)),
+        ...(latest.error ? [buildStatLine("error", latest.error)] : []),
+      ]),
+    );
+  } else if (primary.error) {
+    lines.push("", buildSection("⚠️ Error", [primary.error]));
   }
-  if (latest.content.trim()) {
-    lines.push("", buildSection("📝 Preview", [formatFocusPreview(latest.content)]));
+  if (primary.content.trim()) {
+    lines.push("", buildSection("📝 Preview", [formatFocusPreview(primary.content)]));
   }
   return lines.join("\n");
 }

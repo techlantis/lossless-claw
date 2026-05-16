@@ -48,6 +48,7 @@ export { FocusBriefStore, hashFocusSourceContext } from "./focus-brief-store.js"
 export type {
   ActiveFocusSummaryRecord,
   CreateFocusBriefInput,
+  FocusBriefDiagnostics,
   FocusBriefRecord,
   FocusBriefSourceRecord,
   FocusBriefSourceRole,

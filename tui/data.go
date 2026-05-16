@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -132,25 +133,35 @@ type contextItemEntry struct {
 
 // focusBriefEntry represents a generated focus brief for a conversation.
 type focusBriefEntry struct {
-	briefID             string
-	conversationID      int64
-	prompt              string
-	content             string
-	status              string
-	tokenCount          int
-	targetTokens        int
-	createdAt           string
-	updatedAt           string
-	generatorRunID      string
-	generatorSessionKey string
-	errorText           string
-	sourceCount         int
-	citedCount          int
-	expandedCount       int
-	irrelevantCount     int
-	citedSummaryIDs     []string
-	expandedSummaryIDs  []string
-	preview             string
+	briefID               string
+	conversationID        int64
+	prompt                string
+	content               string
+	status                string
+	tokenCount            int
+	targetTokens          int
+	createdAt             string
+	updatedAt             string
+	generatorRunID        string
+	generatorSessionKey   string
+	errorText             string
+	coveredLatestAt       string
+	coveredMessageSeq     int64
+	hasCoveredMessageSeq  bool
+	sourceContextHash     string
+	truncated             bool
+	postFocusMessageCount int
+	postFocusSummaryCount int
+	postFocusTokenCount   int
+	sourceContextChanged  bool
+	stale                 bool
+	sourceCount           int
+	citedCount            int
+	expandedCount         int
+	irrelevantCount       int
+	citedSummaryIDs       []string
+	expandedSummaryIDs    []string
+	preview               string
 }
 
 // summaryGraph is the in-memory DAG used by the summary drill-down view.
@@ -1451,6 +1462,10 @@ func loadFocusBriefs(dbPath, sessionID string) ([]focusBriefEntry, error) {
 			COALESCE(status, ''),
 			COALESCE(token_count, 0),
 			COALESCE(target_tokens, 0),
+			covered_latest_at,
+			covered_message_seq,
+			COALESCE(source_context_hash, ''),
+			COALESCE(raw_result_json, ''),
 			COALESCE(created_at, ''),
 			COALESCE(updated_at, ''),
 			COALESCE(generator_run_id, ''),
@@ -1468,6 +1483,9 @@ func loadFocusBriefs(dbPath, sessionID string) ([]focusBriefEntry, error) {
 	briefs := make([]focusBriefEntry, 0)
 	for rows.Next() {
 		var brief focusBriefEntry
+		var coveredLatestAt sql.NullString
+		var coveredMessageSeq sql.NullInt64
+		var rawResultJSON string
 		if err := rows.Scan(
 			&brief.briefID,
 			&brief.conversationID,
@@ -1476,6 +1494,10 @@ func loadFocusBriefs(dbPath, sessionID string) ([]focusBriefEntry, error) {
 			&brief.status,
 			&brief.tokenCount,
 			&brief.targetTokens,
+			&coveredLatestAt,
+			&coveredMessageSeq,
+			&brief.sourceContextHash,
+			&rawResultJSON,
 			&brief.createdAt,
 			&brief.updatedAt,
 			&brief.generatorRunID,
@@ -1487,8 +1509,19 @@ func loadFocusBriefs(dbPath, sessionID string) ([]focusBriefEntry, error) {
 		brief.content = sanitizeForTerminal(brief.content)
 		brief.prompt = sanitizeForTerminal(brief.prompt)
 		brief.errorText = sanitizeForTerminal(brief.errorText)
+		if coveredLatestAt.Valid {
+			brief.coveredLatestAt = coveredLatestAt.String
+		}
+		if coveredMessageSeq.Valid {
+			brief.coveredMessageSeq = coveredMessageSeq.Int64
+			brief.hasCoveredMessageSeq = true
+		}
+		brief.truncated = focusBriefRawTruncated(rawResultJSON)
 		brief.preview = oneLine(brief.content)
 		if err := populateFocusBriefSourceStats(db, &brief); err != nil {
+			return nil, err
+		}
+		if err := populateFocusBriefDiagnostics(db, &brief); err != nil {
 			return nil, err
 		}
 		briefs = append(briefs, brief)
@@ -1497,6 +1530,153 @@ func loadFocusBriefs(dbPath, sessionID string) ([]focusBriefEntry, error) {
 		return nil, fmt.Errorf("iterate focus briefs: %w", err)
 	}
 	return briefs, nil
+}
+
+// loadActiveFocusBrief returns the active focus overlay for a session, if any.
+func loadActiveFocusBrief(dbPath, sessionID string) (*focusBriefEntry, error) {
+	briefs, err := loadFocusBriefs(dbPath, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	for idx := range briefs {
+		if briefs[idx].status == "active" {
+			brief := briefs[idx]
+			return &brief, nil
+		}
+	}
+	return nil, nil
+}
+
+// focusBriefRawTruncated reads the generator's truncation marker from raw JSON.
+func focusBriefRawTruncated(raw string) bool {
+	var parsed struct {
+		Truncated bool `json:"truncated"`
+	}
+	if strings.TrimSpace(raw) == "" {
+		return false
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return false
+	}
+	return parsed.Truncated
+}
+
+// populateFocusBriefDiagnostics adds post-focus drift and source freshness state.
+func populateFocusBriefDiagnostics(db *sql.DB, brief *focusBriefEntry) error {
+	if brief.hasCoveredMessageSeq {
+		exists, err := sqliteTableExists(db, "messages")
+		if err != nil {
+			return fmt.Errorf("check messages schema for focus diagnostics: %w", err)
+		}
+		if exists {
+			if err := db.QueryRow(`
+				SELECT COUNT(*), COALESCE(SUM(token_count), 0)
+				FROM messages
+				WHERE conversation_id = ?
+				  AND seq > ?
+			`, brief.conversationID, brief.coveredMessageSeq).Scan(
+				&brief.postFocusMessageCount,
+				&brief.postFocusTokenCount,
+			); err != nil {
+				return fmt.Errorf("query post-focus messages for %s: %w", brief.briefID, err)
+			}
+		}
+	}
+
+	summaryWatermark := strings.TrimSpace(brief.coveredLatestAt)
+	summaryPredicate := "datetime(created_at) > datetime(?)"
+	if summaryWatermark == "" {
+		summaryWatermark = strings.TrimSpace(brief.createdAt)
+	} else {
+		summaryPredicate = "latest_at IS NOT NULL AND datetime(latest_at) > datetime(?)"
+	}
+	if summaryWatermark != "" {
+		exists, err := sqliteTableExists(db, "summaries")
+		if err != nil {
+			return fmt.Errorf("check summaries schema for focus diagnostics: %w", err)
+		}
+		if exists {
+			var summaryTokens int
+			query := fmt.Sprintf(`
+				SELECT COUNT(*), COALESCE(SUM(token_count), 0)
+				FROM summaries
+				WHERE conversation_id = ?
+				  AND %s
+			`, summaryPredicate)
+			if err := db.QueryRow(query, brief.conversationID, summaryWatermark).Scan(
+				&brief.postFocusSummaryCount,
+				&summaryTokens,
+			); err != nil {
+				return fmt.Errorf("query post-focus summaries for %s: %w", brief.briefID, err)
+			}
+			brief.postFocusTokenCount += summaryTokens
+		}
+	}
+
+	activeHash, err := activeFocusSourceContextHash(db, brief.conversationID)
+	if err != nil {
+		return err
+	}
+	brief.sourceContextChanged = strings.TrimSpace(brief.sourceContextHash) != "" &&
+		activeHash != "" &&
+		activeHash != brief.sourceContextHash
+	brief.stale = brief.postFocusMessageCount > 0 ||
+		brief.postFocusSummaryCount > 0 ||
+		brief.sourceContextChanged
+	return nil
+}
+
+// activeFocusSourceContextHash mirrors the runtime focus source fingerprint.
+func activeFocusSourceContextHash(db *sql.DB, conversationID int64) (string, error) {
+	contextExists, err := sqliteTableExists(db, "context_items")
+	if err != nil {
+		return "", fmt.Errorf("check context schema for focus diagnostics: %w", err)
+	}
+	summaryExists, err := sqliteTableExists(db, "summaries")
+	if err != nil {
+		return "", fmt.Errorf("check summary schema for focus diagnostics: %w", err)
+	}
+	if !contextExists || !summaryExists {
+		return "", nil
+	}
+
+	rows, err := db.Query(`
+		SELECT
+			ci.ordinal,
+			s.summary_id,
+			COALESCE(s.token_count, 0),
+			COALESCE(s.latest_at, '')
+		FROM context_items ci
+		JOIN summaries s ON s.summary_id = ci.summary_id
+		WHERE ci.conversation_id = ?
+		  AND ci.item_type = 'summary'
+		ORDER BY ci.ordinal
+	`, conversationID)
+	if err != nil {
+		return "", fmt.Errorf("query active focus source hash: %w", err)
+	}
+	defer rows.Close()
+
+	hasher := sha256.New()
+	count := 0
+	for rows.Next() {
+		var ordinal int
+		var summaryID string
+		var tokenCount int
+		var latestAt string
+		if err := rows.Scan(&ordinal, &summaryID, &tokenCount, &latestAt); err != nil {
+			return "", fmt.Errorf("scan active focus source hash: %w", err)
+		}
+		fmt.Fprintf(hasher, "%d\x00%s\x00%d\x00%s\n", ordinal, summaryID, tokenCount, latestAt)
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("iterate active focus source hash: %w", err)
+	}
+	if count == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
 }
 
 // populateFocusBriefSourceStats adds source/citation counts and IDs to one brief.

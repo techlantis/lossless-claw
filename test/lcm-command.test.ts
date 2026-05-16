@@ -7,6 +7,7 @@ import { getLcmDbFeatures } from "../src/db/features.js";
 import { createLcmDatabaseConnection, closeLcmConnection } from "../src/db/connection.js";
 import { resolveLcmConfig } from "../src/db/config.js";
 import { ConversationStore } from "../src/store/conversation-store.js";
+import { FocusBriefStore } from "../src/store/focus-brief-store.js";
 import { SummaryStore } from "../src/store/summary-store.js";
 import { createLcmCommand, __testing } from "../src/plugin/lcm-command.js";
 import type { LcmSummarizeFn } from "../src/summarize.js";
@@ -277,6 +278,9 @@ describe("lcm command", () => {
         tokenCount: 8,
       },
     ]);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ?`)
+      .run("2026-05-15 00:00:00", currentConversation.conversationId);
     await fixture.summaryStore.insertSummary({
       summaryId: "focus_leaf",
       conversationId: currentConversation.conversationId,
@@ -301,6 +305,9 @@ describe("lcm command", () => {
       sourceMessageTokenCount: 14,
     });
     await fixture.summaryStore.linkSummaryToParents("focus_parent", ["focus_leaf"]);
+    fixture.db
+      .prepare(`UPDATE summaries SET latest_at = ? WHERE summary_id = ?`)
+      .run("2026-05-15 00:00:00", "focus_parent");
     await fixture.summaryStore.replaceContextRangeWithSummary({
       conversationId: currentConversation.conversationId,
       startOrdinal: 0,
@@ -446,14 +453,65 @@ describe("lcm command", () => {
       { summary_id: "unrelated_summary", role: "irrelevant" },
     ]);
 
+    const [postFocusMessage] = await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: currentConversation.conversationId,
+        seq: 2,
+        role: "user",
+        content: "Alpha auth post-focus review note.",
+        tokenCount: 9,
+      },
+    ]);
+    await fixture.summaryStore.insertSummary({
+      summaryId: "focus_delta",
+      conversationId: currentConversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: "Alpha auth post-focus context.",
+      tokenCount: 11,
+      sourceMessageTokenCount: 9,
+      latestAt: new Date("2026-05-16T00:00:00Z"),
+    });
+    await fixture.summaryStore.linkSummaryToMessages("focus_delta", [postFocusMessage.messageId]);
+    await fixture.summaryStore.replaceContextRangeWithSummary({
+      conversationId: currentConversation.conversationId,
+      startOrdinal: 0,
+      endOrdinal: 0,
+      summaryId: "focus_delta",
+    });
+    const focusStore = new FocusBriefStore(fixture.db);
+    await focusStore.createFocusBrief({
+      conversationId: currentConversation.conversationId,
+      prompt: "failed refocus",
+      content: "",
+      status: "failed",
+      error: "generation timed out",
+      supersedeCurrentDrafts: false,
+    });
+
     const status = await command.handler(
       createCommandContext("focus", {
         sessionKey,
       }),
     );
     expect(status.text).toContain(`brief id: \`${brief.brief_id}\``);
+    expect(status.text).toContain("status: active");
     expect(status.text).toContain("source summaries: 1");
     expect(status.text).toContain("cited summaries: focus_parent");
+    expect(status.text).toContain("delta since focus: 1 messages, 1 summaries, ~20 tokens");
+    expect(status.text).toContain("stale: yes");
+    expect(status.text).toContain("source snapshot: obsolete");
+    expect(status.text).toContain("latest generation: failed");
+    expect(status.text).toContain("generation timed out");
+
+    const generalStatus = await command.handler(
+      createCommandContext("status", {
+        sessionKey,
+      }),
+    );
+    expect(generalStatus.text).toContain("**🎯 Focus**");
+    expect(generalStatus.text).toContain("status: active");
+    expect(generalStatus.text).toContain("delta since focus: 1 messages, 1 summaries, ~20 tokens");
 
     const unfocus = await command.handler(
       createCommandContext("unfocus", {

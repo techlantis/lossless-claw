@@ -37,6 +37,16 @@ export type FocusBriefSourceRecord = {
   createdAt: Date;
 };
 
+/** Freshness and source-state diagnostics for a persisted focus brief. */
+export type FocusBriefDiagnostics = {
+  postFocusMessageCount: number;
+  postFocusSummaryCount: number;
+  postFocusTokenCount: number;
+  sourceContextChanged: boolean;
+  stale: boolean;
+  truncated: boolean;
+};
+
 /** Active summary context item used as focus generator input. */
 export type ActiveFocusSummaryRecord = {
   ordinal: number;
@@ -114,6 +124,11 @@ type ActiveFocusSummaryRow = {
   content: string;
 };
 
+type CountAndTokenRow = {
+  count: number;
+  tokens: number;
+};
+
 function toFocusBriefRecord(row: FocusBriefRow): FocusBriefRecord {
   return {
     briefId: row.brief_id,
@@ -162,6 +177,22 @@ function toActiveFocusSummaryRecord(row: ActiveFocusSummaryRow): ActiveFocusSumm
 
 function createFocusBriefId(): string {
   return `focus_${randomBytes(8).toString("hex")}`;
+}
+
+function formatSqliteUtcTimestamp(value: Date): string {
+  return value.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function parseFocusBriefTruncated(rawResultJson: string | null): boolean {
+  if (!rawResultJson?.trim()) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(rawResultJson) as { truncated?: unknown };
+    return parsed.truncated === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Compute a stable fingerprint for the active summary context behind a brief. */
@@ -214,15 +245,24 @@ export class FocusBriefStore {
   }> {
     const row = this.db
       .prepare(
-        `SELECT
-           MAX(s.latest_at) AS covered_latest_at,
+        `WITH RECURSIVE covered(summary_id) AS (
+           SELECT ci.summary_id
+           FROM context_items ci
+           WHERE ci.conversation_id = ?
+             AND ci.item_type = 'summary'
+             AND ci.summary_id IS NOT NULL
+           UNION
+           SELECT sp.parent_summary_id
+           FROM summary_parents sp
+           JOIN covered parent ON parent.summary_id = sp.summary_id
+         )
+         SELECT
+           MAX(COALESCE(s.latest_at, m.created_at)) AS covered_latest_at,
            MAX(m.seq) AS covered_message_seq
-         FROM context_items ci
-         LEFT JOIN summaries s ON s.summary_id = ci.summary_id AND ci.item_type = 'summary'
+         FROM covered c
+         JOIN summaries s ON s.summary_id = c.summary_id
          LEFT JOIN summary_messages sm ON sm.summary_id = s.summary_id
-         LEFT JOIN messages m ON m.message_id = sm.message_id
-         WHERE ci.conversation_id = ?
-           AND ci.item_type = 'summary'`,
+         LEFT JOIN messages m ON m.message_id = sm.message_id`,
       )
       .get(conversationId) as
       | { covered_latest_at: string | null; covered_message_seq: number | null }
@@ -460,5 +500,57 @@ export class FocusBriefStore {
       )
       .all(briefId) as FocusBriefSourceRow[];
     return rows.map(toFocusBriefSourceRecord);
+  }
+
+  /** Return post-focus drift and source-obsolescence diagnostics for a brief. */
+  async getFocusBriefDiagnostics(brief: FocusBriefRecord): Promise<FocusBriefDiagnostics> {
+    let postFocusMessageCount = 0;
+    let postFocusMessageTokens = 0;
+    if (brief.coveredMessageSeq !== null) {
+      const row = this.db
+        .prepare(
+          `SELECT COUNT(*) AS count, COALESCE(SUM(token_count), 0) AS tokens
+           FROM messages
+           WHERE conversation_id = ?
+             AND seq > ?`,
+        )
+        .get(brief.conversationId, brief.coveredMessageSeq) as CountAndTokenRow | undefined;
+      postFocusMessageCount = Math.max(0, Math.floor(row?.count ?? 0));
+      postFocusMessageTokens = Math.max(0, Math.floor(row?.tokens ?? 0));
+    }
+
+    let postFocusSummaryCount = 0;
+    let postFocusSummaryTokens = 0;
+    const summaryWatermark = formatSqliteUtcTimestamp(brief.coveredLatestAt ?? brief.createdAt);
+    const summaryPredicate =
+      brief.coveredLatestAt !== null
+        ? "latest_at IS NOT NULL AND datetime(latest_at) > datetime(?)"
+        : "datetime(created_at) > datetime(?)";
+    const summaryRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(token_count), 0) AS tokens
+         FROM summaries
+         WHERE conversation_id = ?
+           AND ${summaryPredicate}`,
+      )
+      .get(brief.conversationId, summaryWatermark) as CountAndTokenRow | undefined;
+    postFocusSummaryCount = Math.max(0, Math.floor(summaryRow?.count ?? 0));
+    postFocusSummaryTokens = Math.max(0, Math.floor(summaryRow?.tokens ?? 0));
+
+    const activeSummaries = await this.getActiveContextSummaries(brief.conversationId);
+    const activeSourceContextHash = hashFocusSourceContext(activeSummaries);
+    const sourceContextChanged =
+      brief.sourceContextHash.trim() !== "" &&
+      activeSourceContextHash.trim() !== "" &&
+      activeSourceContextHash !== brief.sourceContextHash;
+    const postFocusTokenCount = postFocusMessageTokens + postFocusSummaryTokens;
+    return {
+      postFocusMessageCount,
+      postFocusSummaryCount,
+      postFocusTokenCount,
+      sourceContextChanged,
+      stale: postFocusMessageCount > 0 || postFocusSummaryCount > 0 || sourceContextChanged,
+      truncated: parseFocusBriefTruncated(brief.rawResultJson),
+    };
   }
 }

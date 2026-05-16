@@ -171,9 +171,9 @@ The status bar shows totals: how many summaries, how many messages, total items,
 
 ## Focus Briefs View
 
-Lists focus briefs generated for the selected LCM conversation. Each row shows status, creation time, brief ID, token count, and prompt preview. The detail panel shows generator metadata, source/citation counts, cited and expanded summary IDs, the original focus prompt, and the generated brief content.
+Lists focus briefs generated for the selected LCM conversation. Each row shows status, creation time, brief ID, token count, and prompt preview. The detail panel shows generator metadata, source/citation counts, post-focus drift diagnostics, cited and expanded summary IDs, the original focus prompt, and the generated brief content.
 
-This view is read-only. Focus briefs are not shown inline in the conversation view yet.
+This view is read-only. When a focus brief is active, the conversation and active-context screens show a compact focus banner with the brief ID, prompt preview, token count, and stale/source-snapshot diagnostics.
 
 | Key | Action |
 |-----|--------|

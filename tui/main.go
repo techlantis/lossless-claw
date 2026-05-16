@@ -122,6 +122,7 @@ type model struct {
 	focusBriefs       []focusBriefEntry
 	focusBriefCursor  int
 	focusDetailScroll int
+	activeFocusBrief  *focusBriefEntry
 
 	agentCursor         int
 	sessionCursor       int
@@ -528,6 +529,10 @@ func (m model) handleConversationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "No session selected"
 			return m, nil
 		}
+		if err := m.refreshActiveFocusForSession(session); err != nil {
+			m.status = "Error: " + err.Error()
+			return m, nil
+		}
 		items, err := loadContextItems(m.paths.lcmDBPath, session.id)
 		if err != nil {
 			m.status = "Error: " + err.Error()
@@ -565,6 +570,7 @@ func (m model) handleConversationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.focusBriefs = briefs
+		m.setActiveFocusFromBriefs(briefs)
 		m.focusBriefCursor = 0
 		m.focusDetailScroll = 0
 		m.screen = screenFocusBriefs
@@ -849,6 +855,10 @@ func (m model) handleContextKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "No session selected"
 			return m, nil
 		}
+		if err := m.refreshActiveFocusForSession(session); err != nil {
+			m.status = "Error: " + err.Error()
+			return m, nil
+		}
 		items, err := loadContextItems(m.paths.lcmDBPath, session.id)
 		if err != nil {
 			m.status = "Error: " + err.Error()
@@ -895,6 +905,7 @@ func (m model) handleFocusBriefsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.focusBriefs = briefs
+		m.setActiveFocusFromBriefs(briefs)
 		m.focusBriefCursor = clamp(m.focusBriefCursor, 0, len(m.focusBriefs)-1)
 		m.status = fmt.Sprintf("Reloaded %d focus briefs", len(briefs))
 	case "b", "backspace":
@@ -944,8 +955,12 @@ func (m *model) openConversationForSession(session sessionEntry) error {
 	m.conversationWindow.hasNewer = false
 
 	if session.conversationID > 0 {
+		if err := m.refreshActiveFocusForSession(session); err != nil {
+			return err
+		}
 		return m.loadLatestConversationWindowForSession(session, "Loaded")
 	}
+	m.activeFocusBrief = nil
 	return m.loadConversationFromSessionFile(session, "Loaded")
 }
 
@@ -957,6 +972,7 @@ func (m *model) openCodexBackendForSession(session sessionEntry) error {
 	if session.codexBackendPath == "" {
 		return fmt.Errorf("Codex binding %s has no local backend transcript", session.codexThreadID)
 	}
+	m.activeFocusBrief = nil
 	m.conversationWindow.enabled = false
 	m.conversationWindow.conversationID = 0
 	m.conversationWindow.oldestMessageID = 0
@@ -1033,8 +1049,12 @@ func (m *model) reloadConversationWindow() error {
 		return fmt.Errorf("no session selected")
 	}
 	if session.conversationID > 0 {
+		if err := m.refreshActiveFocusForSession(session); err != nil {
+			return err
+		}
 		return m.loadLatestConversationWindowForSession(session, "Reloaded")
 	}
+	m.activeFocusBrief = nil
 	return m.loadConversationFromSessionFile(session, "Reloaded")
 }
 
@@ -1718,6 +1738,9 @@ func (m model) renderHeader() string {
 		if conversationID, ok := m.currentConversationID(); ok {
 			title += fmt.Sprintf(" | conv_id:%d", conversationID)
 		}
+		if m.activeFocusBrief != nil {
+			title += fmt.Sprintf(" | focus:%s", shortFocusBriefID(m.activeFocusBrief.briefID))
+		}
 	case screenSummaries:
 		title += " | LCM Summary DAG"
 		if m.summary.conversationID > 0 {
@@ -1732,6 +1755,9 @@ func (m model) renderHeader() string {
 		title += " | LCM Active Context"
 		if conversationID, ok := m.currentConversationID(); ok {
 			title += fmt.Sprintf(" | conv_id:%d", conversationID)
+		}
+		if m.activeFocusBrief != nil {
+			title += fmt.Sprintf(" | focus:%s", shortFocusBriefID(m.activeFocusBrief.briefID))
 		}
 	case screenFocusBriefs:
 		title += " | LCM Focus Briefs"
@@ -2279,6 +2305,9 @@ func (m model) renderFileDetail(detailHeight int) []string {
 
 func (m model) renderContext() string {
 	if len(m.contextItems) == 0 {
+		if banner := renderActiveFocusBanner(m.activeFocusBrief, m.width); banner != "" {
+			return banner + "\n\nNo context items found for this session"
+		}
 		return "No context items found for this session"
 	}
 
@@ -2298,7 +2327,11 @@ func (m model) renderContext() string {
 	}
 
 	detailLines := m.renderContextDetail(detailHeight)
-	return strings.Join(listLines, "\n") + "\n" + helpStyle.Render(strings.Repeat("-", max(20, m.width-1))) + "\n" + strings.Join(detailLines, "\n")
+	rendered := strings.Join(listLines, "\n") + "\n" + helpStyle.Render(strings.Repeat("-", max(20, m.width-1))) + "\n" + strings.Join(detailLines, "\n")
+	if banner := renderActiveFocusBanner(m.activeFocusBrief, m.width); banner != "" {
+		return banner + "\n" + rendered
+	}
+	return rendered
 }
 
 func (m model) formatContextItemLine(item contextItemEntry) string {
@@ -2404,13 +2437,64 @@ func (m model) renderFocusBriefs() string {
 func (m model) formatFocusBriefLine(brief focusBriefEntry) string {
 	maxPrompt := max(8, m.width-80)
 	prompt := truncateString(oneLine(brief.prompt), maxPrompt)
-	id := brief.briefID[:min(18, len(brief.briefID))]
+	id := shortFocusBriefID(brief.briefID)
 	tokenLabel := fmt.Sprintf("%dt", brief.tokenCount)
 	if brief.targetTokens > 0 {
 		tokenLabel = fmt.Sprintf("%d/%dt", brief.tokenCount, brief.targetTokens)
 	}
 	return fmt.Sprintf("  %-10s %-19s [%s, %s] %s",
 		brief.status, formatTimestamp(brief.createdAt), id, tokenLabel, prompt)
+}
+
+// shortFocusBriefID returns a compact identifier for status chrome.
+func shortFocusBriefID(briefID string) string {
+	return briefID[:min(18, len(briefID))]
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func focusSourceSnapshotLabel(changed bool) string {
+	if changed {
+		return "obsolete"
+	}
+	return "current"
+}
+
+// renderActiveFocusBanner renders the conversation-level active focus marker.
+func renderActiveFocusBanner(brief *focusBriefEntry, width int) string {
+	if brief == nil || brief.status != "active" {
+		return ""
+	}
+	tokenLabel := fmt.Sprintf("%dt", brief.tokenCount)
+	if brief.targetTokens > 0 {
+		tokenLabel = fmt.Sprintf("%d/%dt", brief.tokenCount, brief.targetTokens)
+	}
+	state := "current"
+	if brief.stale {
+		state = "stale"
+	}
+	sourceState := "source current"
+	if brief.sourceContextChanged {
+		sourceState = "source obsolete"
+	}
+	prompt := truncateString(oneLine(brief.prompt), max(12, width/3))
+	line := fmt.Sprintf(
+		"FOCUS active %s [%s] delta:%d msgs,%d summaries,~%dt %s %s prompt:%s",
+		shortFocusBriefID(brief.briefID),
+		tokenLabel,
+		brief.postFocusMessageCount,
+		brief.postFocusSummaryCount,
+		brief.postFocusTokenCount,
+		state,
+		sourceState,
+		prompt,
+	)
+	return helpStyle.Render(truncateString(line, max(20, width-2)))
 }
 
 // renderFocusBriefDetail renders metadata, prompt, and content for the selected brief.
@@ -2425,6 +2509,10 @@ func (m *model) renderFocusBriefDetail(detailHeight int) []string {
 		fmt.Sprintf("Created: %s  Updated: %s", formatTimestamp(brief.createdAt), formatTimestamp(brief.updatedAt)),
 		fmt.Sprintf("Tokens: %d / %d  Sources: active=%d cited=%d expanded=%d irrelevant=%d",
 			brief.tokenCount, brief.targetTokens, brief.sourceCount, brief.citedCount, brief.expandedCount, brief.irrelevantCount),
+		fmt.Sprintf("Delta since focus: %d messages, %d summaries, ~%d tokens",
+			brief.postFocusMessageCount, brief.postFocusSummaryCount, brief.postFocusTokenCount),
+		fmt.Sprintf("Stale: %s  Truncated: %s  Source snapshot: %s",
+			yesNo(brief.stale), yesNo(brief.truncated), focusSourceSnapshotLabel(brief.sourceContextChanged)),
 	}
 	if brief.generatorRunID != "" || brief.generatorSessionKey != "" {
 		allLines = append(allLines, fmt.Sprintf("Generator: run=%s session=%s", brief.generatorRunID, brief.generatorSessionKey))
@@ -2492,6 +2580,9 @@ func (m *model) refreshConversationViewportWithMode(mode conversationViewportMod
 		return time.Since(start)
 	}
 	content := renderConversationText(m.messages, m.convViewport.Width)
+	if banner := renderActiveFocusBanner(m.activeFocusBrief, m.convViewport.Width); banner != "" {
+		content = banner + "\n\n" + content
+	}
 	m.convViewport.SetContent(content)
 	if mode == conversationViewportTop {
 		m.convViewport.GotoTop()
@@ -2631,6 +2722,32 @@ func (m model) currentConversationID() (int64, bool) {
 		return 0, false
 	}
 	return session.conversationID, true
+}
+
+// refreshActiveFocusForSession loads the active focus overlay for TUI chrome.
+func (m *model) refreshActiveFocusForSession(session sessionEntry) error {
+	if session.conversationID <= 0 {
+		m.activeFocusBrief = nil
+		return nil
+	}
+	brief, err := loadActiveFocusBrief(m.paths.lcmDBPath, session.id)
+	if err != nil {
+		return err
+	}
+	m.activeFocusBrief = brief
+	return nil
+}
+
+// setActiveFocusFromBriefs updates active focus state from an already-loaded list.
+func (m *model) setActiveFocusFromBriefs(briefs []focusBriefEntry) {
+	m.activeFocusBrief = nil
+	for idx := range briefs {
+		if briefs[idx].status == "active" {
+			brief := briefs[idx]
+			m.activeFocusBrief = &brief
+			return
+		}
+	}
 }
 
 func (m model) currentSummaryID() (string, bool) {

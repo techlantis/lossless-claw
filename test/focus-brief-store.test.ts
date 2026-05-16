@@ -142,7 +142,10 @@ describe("FocusBriefStore", () => {
       status: "active",
       tokenCount: 6,
       targetTokens: 12,
+      coveredLatestAt: "2026-05-15 00:00:00",
+      coveredMessageSeq: watermark.coveredMessageSeq,
       sourceContextHash,
+      rawResultJson: JSON.stringify({ truncated: true }),
       sources: [{ summaryId: "focus_store_parent", ordinal: 0, role: "active_input" }],
       supersedeCurrentDrafts: true,
     });
@@ -153,6 +156,60 @@ describe("FocusBriefStore", () => {
     expect(await focusStore.getFocusBrief(secondBrief.briefId)).toMatchObject({
       status: "superseded",
     });
+
+    await focusStore.createFocusBrief({
+      conversationId: conversation.conversationId,
+      prompt: "failed refocus",
+      content: "",
+      status: "failed",
+      error: "generation timed out",
+      supersedeCurrentDrafts: false,
+    });
+    expect(await focusStore.getActiveFocusBrief(conversation.conversationId)).toMatchObject({
+      briefId: activeBrief.briefId,
+      status: "active",
+    });
+    expect(await focusStore.getLatestFocusBrief(conversation.conversationId)).toMatchObject({
+      prompt: "failed refocus",
+      status: "failed",
+    });
+
+    const [postFocusMessage] = await conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 2,
+        role: "user",
+        content: "Focus store post-focus follow-up.",
+        tokenCount: 13,
+      },
+    ]);
+    await summaryStore.insertSummary({
+      summaryId: "focus_store_delta",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: "Focus store post-focus summary.",
+      tokenCount: 9,
+      sourceMessageTokenCount: 13,
+      latestAt: new Date("2026-05-16T00:00:00Z"),
+    });
+    await summaryStore.linkSummaryToMessages("focus_store_delta", [postFocusMessage.messageId]);
+    await summaryStore.replaceContextRangeWithSummary({
+      conversationId: conversation.conversationId,
+      startOrdinal: 0,
+      endOrdinal: 0,
+      summaryId: "focus_store_delta",
+    });
+
+    await expect(focusStore.getFocusBriefDiagnostics(activeBrief)).resolves.toMatchObject({
+      postFocusMessageCount: 1,
+      postFocusSummaryCount: 1,
+      postFocusTokenCount: 22,
+      sourceContextChanged: true,
+      stale: true,
+      truncated: true,
+    });
+
     expect(await focusStore.deactivateActiveFocusBriefs(conversation.conversationId)).toBe(1);
     expect(await focusStore.getActiveFocusBrief(conversation.conversationId)).toBeNull();
     expect(await focusStore.getFocusBrief(activeBrief.briefId)).toMatchObject({
@@ -162,6 +219,6 @@ describe("FocusBriefStore", () => {
     const contextItems = db
       .prepare(`SELECT item_type, summary_id FROM context_items WHERE conversation_id = ? ORDER BY ordinal`)
       .all(conversation.conversationId);
-    expect(contextItems).toEqual([{ item_type: "summary", summary_id: "focus_store_parent" }]);
+    expect(contextItems).toEqual([{ item_type: "summary", summary_id: "focus_store_delta" }]);
   });
 });
