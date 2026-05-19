@@ -295,6 +295,28 @@ Operational logging:
 - rotate logs include `phase`, `action`, `sessionId`, `sessionKey`, `sessionFile`, `sizeBytes`, `thresholdBytes`, `durationMs`, `backupPath`, `bytesRemoved`, `preservedTailMessageCount`, and `checkpointSize`
 - real warning logs include the same available context plus `reason` or `error`; quiet startup skips such as missing files, missing bootstrap mappings, and below-threshold files are counted in the summary instead of logged per candidate
 
+### `independentLogFile`
+
+Writes lossless-claw JSONL logs to an independent plugin-owned file in addition to OpenClaw's runtime logger.
+
+Defaults:
+
+- `enabled: true`
+- `file: /tmp/openclaw/lossless-claw-YYYY-MM-DD.log`
+- `maxFileBytes: 104857600`
+
+Why it matters:
+
+- keeps high-volume `[lcm]` operational traces separate from the shared OpenClaw gateway log
+- still mirrors the same log lines through OpenClaw's runtime logger, so existing diagnostics and `logs.tail` behavior do not regress
+- a dated `lossless-claw-YYYY-MM-DD.log` path rolls over daily, stale dated files are pruned after 24 hours, and oversized files rotate through `.1.log` to `.5.log`
+
+Env overrides:
+
+- `LCM_LOG_FILE_ENABLED`
+- `LCM_LOG_FILE`
+- `LCM_LOG_MAX_FILE_BYTES`
+
 ## Compaction timing and shape
 
 ### `contextThreshold`

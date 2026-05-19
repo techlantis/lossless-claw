@@ -63,6 +63,11 @@ Most installations only need to override a handful of keys. If you want a comple
     "startup": "rotate",
     "runtime": "rotate"
   },
+  "independentLogFile": {
+    "enabled": true,
+    "file": "/tmp/openclaw/lossless-claw-2026-05-19.log",
+    "maxFileBytes": 104857600
+  },
   "cacheAwareCompaction": {
     "enabled": true,
     "cacheTTLSeconds": 300,
@@ -133,8 +138,13 @@ openclaw plugins install --link /path/to/lossless-claw
 | `autoRotateSessionFiles.sizeBytes` | `integer` | `2097152` | `LCM_AUTO_ROTATE_SESSION_FILES_SIZE_BYTES` | Byte threshold that triggers automatic session-file rotation. |
 | `autoRotateSessionFiles.startup` | `"rotate" \| "warn" \| "off"` | `"rotate"` | `LCM_AUTO_ROTATE_SESSION_FILES_STARTUP` | Startup behavior for oversized indexed OpenClaw session transcripts that also have active LCM bootstrap state. |
 | `autoRotateSessionFiles.runtime` | `"rotate" \| "warn" \| "off"` | `"rotate"` | `LCM_AUTO_ROTATE_SESSION_FILES_RUNTIME` | Runtime behavior after `afterTurn()` and `maintain()` check the current transcript size. |
+| `independentLogFile.enabled` | `boolean` | `true` | `LCM_LOG_FILE_ENABLED` | Writes lossless-claw JSONL logs to an independent plugin-owned file in addition to OpenClaw's runtime logger. |
+| `independentLogFile.file` | `string` | `/tmp/openclaw/lossless-claw-YYYY-MM-DD.log` | `LCM_LOG_FILE` | Optional log path. A dated `lossless-claw-YYYY-MM-DD.log` path rolls over daily. |
+| `independentLogFile.maxFileBytes` | `integer` | `104857600` | `LCM_LOG_MAX_FILE_BYTES` | Size threshold for rotating the active lossless-claw log file to `.1.log` through `.5.log`. |
 
 > **Multi-profile note:** `OPENCLAW_STATE_DIR` (set by the host OpenClaw gateway) controls where state is stored. When two gateways run on the same host (e.g. separate bot personas), each gateway sets its own `OPENCLAW_STATE_DIR` and lossless-claw automatically uses that directory for the database, large-file payloads, auth-profile lookups, and legacy secrets — no per-profile plugin config is needed.
+
+Lossless-claw also writes its own operational JSONL log by default at `/tmp/openclaw/lossless-claw-YYYY-MM-DD.log`, beside OpenClaw's `/tmp/openclaw/openclaw-YYYY-MM-DD.log`. The plugin still forwards every line to OpenClaw's runtime logger, so existing gateway logs and diagnostics continue to work. The independent file follows the same practical rotation model as OpenClaw: a dated filename rolls over when the local date changes, stale dated files are pruned after 24 hours, and an oversized active file is rotated through `.1.log` to `.5.log`.
 
 Automatic session-file rotation rewrites only the live session transcript, keeps the active LCM conversation and durable history intact, and refreshes the bootstrap checkpoint. Startup rotation first scans OpenClaw's current indexed session stores for configured agents, then intersects those candidates with active LCM conversations and matching bootstrap file mappings. Automatic rotation does not create a SQLite backup by default; set `autoRotateSessionFiles.createBackups` to `true` to make runtime rotation replace the rolling `rotate-latest` backup and to make startup rotation create one pre-rotation LCM database backup for the batch before any transcript is rewritten. Manual `/lcm rotate` always keeps its backup-backed behavior regardless of this flag. Rotation never runs for ignored sessions, stateless sessions, or sessions without active LCM state. The preserved JSONL tail follows the existing rotate behavior, which is controlled by `freshTailCount`.
 
