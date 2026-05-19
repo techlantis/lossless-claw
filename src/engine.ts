@@ -5446,7 +5446,6 @@ export class LcmContextEngine implements ContextEngine {
                 noAnchorImportReason: "placeholder-checkpoint-recovery",
               });
               if (reconcile.importedMessages > 0) {
-                this.clearStableOrphanStrippingOrdinal(conversation.conversationId);
                 this.recordRecentBootstrapImport(
                   conversation.conversationId,
                   reconcile.importedMessages,
