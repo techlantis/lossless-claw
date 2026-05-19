@@ -299,7 +299,8 @@ Lossless-claw now defaults `proactiveThresholdCompactionMode` to `deferred`.
 - deferred mode records a single coalesced maintenance debt row per conversation
 - new deferred compaction debt is only created for `contextThreshold` pressure and uses reason `"threshold"`
 - `maintain()` consumes threshold debt when the host explicitly opts in to deferred execution
-- `assemble()` consumes pending threshold debt before building the next prompt
+- `assemble()` leaves pending threshold debt for after-turn background drain or host-approved `maintain()` while the live prompt is still within budget
+- `assemble()` only consumes pending threshold debt synchronously when the live prompt estimate is already over the active token budget
 - old non-threshold debt from earlier builds is revalidated; if the conversation is no longer over threshold, it is cleared as a no-op
 - `/lcm status` / `/lossless status` shows the current maintenance state, including pending/running/last-failure details
 - status output also surfaces the latest API/cache telemetry as diagnostics, not as a deferral gate
