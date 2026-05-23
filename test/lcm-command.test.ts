@@ -1631,6 +1631,9 @@ describe("lcm command", () => {
   });
 
   it("uses the normal runtime model chain for doctor apply when no explicit summary model is set", async () => {
+    const hostBoundComplete = vi.fn(async () => ({
+      text: "HOST BOUND REPAIR",
+    }));
     const runtimeComplete = vi.fn(async () => ({
       content: [{ type: "text", text: "RUNTIME REPAIR" }],
     }));
@@ -1691,6 +1694,11 @@ describe("lcm command", () => {
     const result = await fixture.command.handler(
       createCommandContext("doctor apply", {
         sessionKey: "agent:main:telegram:direct:doctor-apply-runtime-config",
+        runtimeContext: {
+          llm: {
+            complete: hostBoundComplete,
+          },
+        },
         config: {
           agents: {
             defaults: {
@@ -1716,6 +1724,11 @@ describe("lcm command", () => {
     expect(result.text).toContain("repaired summaries: 1");
     expect(result.text).not.toContain("could not resolve a summarizer");
     expect(runtimeComplete).toHaveBeenCalled();
+    expect(runtimeComplete.mock.calls[0]?.[0]).toMatchObject({
+      agentId: "main",
+      runtimeLlmComplete: hostBoundComplete,
+    });
+    expect(hostBoundComplete).not.toHaveBeenCalled();
     expect(repaired?.content).toContain("RUNTIME REPAIR");
     expect(repaired?.content).not.toContain("[Truncated from 111 tokens]");
   });

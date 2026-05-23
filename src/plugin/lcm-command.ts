@@ -116,6 +116,10 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function readCommandRuntimeContext(ctx: PluginCommandContext): Record<string, unknown> | undefined {
+  return asRecord(asRecord(ctx)?.runtimeContext);
+}
+
 function formatBoolean(value: boolean): string {
   return value ? "yes" : "no";
 }
@@ -2119,6 +2123,8 @@ async function buildDoctorApplyText(params: {
       deps: params.deps,
       summarize: params.summarize,
       runtimeConfig: params.ctx.config,
+      runtimeContext: readCommandRuntimeContext(params.ctx),
+      sessionKey: current.stats.sessionKey ?? normalizeIdentity(params.ctx.sessionKey),
     });
   } catch (error) {
     return [
