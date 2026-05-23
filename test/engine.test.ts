@@ -10171,6 +10171,62 @@ describe("LcmContextEngine afterTurn dedup guard", () => {
     ]);
   });
 
+  it("ingests no-overlap runtime batches when SQLite host has no transcript path", async () => {
+    const warnLog = vi.fn();
+    const engine = createEngineWithDepsOverrides({
+      log: {
+        info: vi.fn(),
+        warn: warnLog,
+        error: vi.fn(),
+        debug: vi.fn(),
+      },
+    });
+    const sessionId = "after-turn-sqlite-no-path-no-overlap";
+
+    await engine.afterTurn({
+      sessionId,
+      transcriptScope: {
+        agentId: "main",
+        sessionId,
+      },
+      messages: [
+        makeMessage({ role: "user", content: "stored old A" }),
+        makeMessage({ role: "assistant", content: "stored old B" }),
+        makeMessage({ role: "tool", content: "stored old C" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    await engine.afterTurn({
+      sessionId,
+      transcriptScope: {
+        agentId: "main",
+        sessionId,
+      },
+      messages: [
+        makeMessage({ role: "user", content: "sqlite runtime user" }),
+        makeMessage({ role: "assistant", content: "sqlite runtime assistant" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4096,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((message) => message.content)).toEqual([
+      "stored old A",
+      "stored old B",
+      "stored old C",
+      "sqlite runtime user",
+      "sqlite runtime assistant",
+    ]);
+    expect(warnLog).toHaveBeenCalledWith(
+      `[lcm] dedup: oversized, storedCount=3 batchLen=2, no overlap found — ingesting full batch`,
+    );
+  });
+
   it("ingests all messages when no prior conversation exists (new session)", async () => {
     const infoLog = vi.fn();
     const engine = createEngineWithDepsOverrides({
