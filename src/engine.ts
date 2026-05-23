@@ -8,7 +8,6 @@ import type {
   ContextEngineInfo,
   ContextEngineHostCapability,
   ContextEngineRuntimeContext,
-  ContextEngineTranscriptScope,
   AssembleResult,
   BootstrapResult,
   CompactResult,
@@ -5833,8 +5832,6 @@ export class LcmContextEngine implements ContextEngine {
   async compact(params: {
     sessionId: string;
     sessionKey?: string;
-    sessionFile?: string;
-    transcriptScope?: ContextEngineTranscriptScope;
     tokenBudget?: number;
     currentTokenCount?: number;
     compactionTarget?: "budget" | "threshold";
