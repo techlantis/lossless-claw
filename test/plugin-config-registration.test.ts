@@ -260,7 +260,6 @@ describe("lcm plugin registration", () => {
       ignoreSessionPatterns: ["agent:*:cron:**", "agent:main:subagent:**"],
       statelessSessionPatterns: ["agent:*:subagent:**"],
       skipStatelessSessions: true,
-      transcriptGcEnabled: true,
       proactiveThresholdCompactionMode: "inline",
       largeFileThresholdTokens: 12345,
     });
@@ -296,7 +295,6 @@ describe("lcm plugin registration", () => {
       ignoreSessionPatterns: ["agent:*:cron:**", "agent:main:subagent:**"],
       statelessSessionPatterns: ["agent:*:subagent:**"],
       skipStatelessSessions: true,
-      transcriptGcEnabled: true,
       proactiveThresholdCompactionMode: "inline",
       largeFileTokenThreshold: 12345,
     });

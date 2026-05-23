@@ -5064,6 +5064,145 @@ export class LcmContextEngine implements ContextEngine {
     };
   }
 
+  private async ingestSingle(params: {
+    sessionId: string;
+    sessionKey?: string;
+    message: AgentMessage;
+    isHeartbeat?: boolean;
+    skipReplayTimestampFloodGuard?: boolean;
+  }): Promise<IngestResult> {
+    const { sessionId, sessionKey, message, isHeartbeat, skipReplayTimestampFloodGuard } = params;
+    if (isHeartbeat) {
+      return { ingested: false };
+    }
+    if (!hasPersistableMessageRole(message)) {
+      return { ingested: false };
+    }
+
+    const topLevel = message as unknown as Record<string, unknown>;
+    if (message.role === "assistant") {
+      const stopReason =
+        typeof topLevel.stopReason === "string"
+          ? topLevel.stopReason
+          : typeof topLevel.stop_reason === "string"
+            ? topLevel.stop_reason
+            : undefined;
+      if (stopReason === "error" || stopReason === "aborted") {
+        const content = topLevel.content;
+        const isEmpty =
+          content === undefined ||
+          content === null ||
+          content === "" ||
+          (Array.isArray(content) && content.length === 0);
+        if (isEmpty) {
+          return { ingested: false };
+        }
+      }
+    }
+
+    let stored = toStoredMessage(message);
+    const conversation = await this.conversationStore.getOrCreateConversation(sessionId, {
+      sessionKey,
+    });
+    const conversationId = conversation.conversationId;
+    let messageForParts = message;
+
+    const nativeImageIntercepted = await this.interceptNativeImageBlocks({
+      conversationId,
+      message: messageForParts,
+    });
+    if (nativeImageIntercepted) {
+      messageForParts = nativeImageIntercepted.rewrittenMessage;
+      stored = toStoredMessage(messageForParts);
+    }
+
+    if (stored.role === "tool") {
+      const imageIntercepted = await this.interceptInlineImagesInToolMessage({
+        conversationId,
+        message: messageForParts,
+      });
+      if (imageIntercepted) {
+        messageForParts = imageIntercepted.rewrittenMessage;
+        stored = toStoredMessage(messageForParts);
+      }
+    } else {
+      const imageIntercepted = await this.interceptInlineImages({
+        conversationId,
+        content: stored.content,
+        role: stored.role,
+      });
+      if (imageIntercepted) {
+        stored.content = imageIntercepted.rewrittenContent;
+        stored.tokenCount = estimateTokens(stored.content);
+        if ("content" in message) {
+          messageForParts = {
+            ...message,
+            content: stored.content,
+          } as AgentMessage;
+        }
+      }
+    }
+
+    if (stored.role === "user") {
+      const intercepted = await this.interceptLargeFiles({
+        conversationId,
+        content: stored.content,
+      });
+      if (intercepted) {
+        stored.content = intercepted.rewrittenContent;
+        stored.tokenCount = estimateTokens(stored.content);
+        if ("content" in message) {
+          messageForParts = {
+            ...message,
+            content: stored.content,
+          } as AgentMessage;
+        }
+      }
+    } else if (stored.role === "tool") {
+      const intercepted = await this.interceptLargeToolResults({
+        conversationId,
+        message: messageForParts,
+      });
+      if (intercepted) {
+        messageForParts = intercepted.rewrittenMessage;
+        const rewrittenStored = toStoredMessage(intercepted.rewrittenMessage);
+        stored.content = rewrittenStored.content;
+        stored.tokenCount = rewrittenStored.tokenCount;
+      }
+    }
+
+    const rawPayloadIntercepted = await this.interceptLargeRawPayload({
+      conversationId,
+      message: messageForParts,
+      stored,
+    });
+    if (rawPayloadIntercepted) {
+      messageForParts = rawPayloadIntercepted.rewrittenMessage;
+      stored = rawPayloadIntercepted.stored;
+    }
+
+    const seq = (await this.conversationStore.getMaxSeq(conversationId)) + 1;
+    const msgRecord = await this.conversationStore.createMessage({
+      conversationId,
+      seq,
+      role: stored.role,
+      content: stored.content,
+      tokenCount: stored.tokenCount,
+      skipReplayTimestampFloodGuard,
+    });
+    await this.conversationStore.createMessageParts(
+      msgRecord.messageId,
+      buildMessageParts({
+        sessionId,
+        message: messageForParts,
+        fallbackContent: stored.content,
+      }),
+    );
+    await this.summaryStore.appendContextMessage(conversationId, msgRecord.messageId);
+
+    return { ingested: true };
+  }
+
   async ingest(params: {
     sessionId: string;
     sessionKey?: string;
@@ -6181,4 +6320,3 @@ function createEmergencyFallbackSummarize(): (
     return text.slice(0, maxChars) + "\n[Truncated for context management]";
   };
 }
-
