@@ -72,6 +72,15 @@ type RuntimeAgentSessionApi = {
 };
 type RuntimeAgentSessionApiCandidate = Partial<RuntimeAgentSessionApi>;
 
+/** Read a session key from host-provided plugin tool context. */
+function readToolContextSessionKey(ctx: unknown): string | undefined {
+  if (!ctx || typeof ctx !== "object") {
+    return undefined;
+  }
+  const sessionKey = (ctx as { sessionKey?: unknown }).sessionKey;
+  return typeof sessionKey === "string" && sessionKey.trim() ? sessionKey : undefined;
+}
+
 type RuntimeConfigSnapshotApi = {
   current?: () => unknown;
   loadConfig?: () => unknown;
@@ -1263,25 +1272,42 @@ function wirePluginHandlers(
   api.registerContextEngine("lossless-claw", () => shared.getCachedEngine() ?? shared.waitForEngine());
 
   api.registerTool(
-    (ctx) => createLcmGrepTool({ deps, getLcm: shared.waitForEngine, sessionKey: ctx.sessionKey }),
+    (ctx) =>
+      createLcmGrepTool({
+        deps,
+        getLcm: shared.waitForEngine,
+        sessionKey: readToolContextSessionKey(ctx),
+      }),
     { name: "lcm_grep" },
   );
   api.registerTool(
-    (ctx) => createLcmDescribeTool({ deps, getLcm: shared.waitForEngine, sessionKey: ctx.sessionKey }),
+    (ctx) =>
+      createLcmDescribeTool({
+        deps,
+        getLcm: shared.waitForEngine,
+        sessionKey: readToolContextSessionKey(ctx),
+      }),
     { name: "lcm_describe" },
   );
   api.registerTool(
-    (ctx) => createLcmExpandTool({ deps, getLcm: shared.waitForEngine, sessionKey: ctx.sessionKey }),
+    (ctx) =>
+      createLcmExpandTool({
+        deps,
+        getLcm: shared.waitForEngine,
+        sessionKey: readToolContextSessionKey(ctx),
+      }),
     { name: "lcm_expand" },
   );
   api.registerTool(
-    (ctx) =>
-      createLcmExpandQueryTool({
+    (ctx) => {
+      const sessionKey = readToolContextSessionKey(ctx);
+      return createLcmExpandQueryTool({
         deps,
         getLcm: shared.waitForEngine,
-        sessionKey: ctx.sessionKey,
-        requesterSessionKey: ctx.sessionKey,
-      }),
+        sessionKey,
+        requesterSessionKey: sessionKey,
+      });
+    },
     { name: "lcm_expand_query" },
   );
 
