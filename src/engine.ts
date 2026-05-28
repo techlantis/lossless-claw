@@ -135,6 +135,7 @@ type RotateTranscriptRewriteResult = {
 };
 type AutoRotateSessionFilePhase = "startup" | "runtime";
 type AutoRotateSessionFileAction = "rotate" | "warn" | "skip" | "summary";
+type AutoRotateSessionFileCaller = "after-turn" | "maintain";
 type ContextEngineMaintenanceResult = {
   changed: boolean;
   bytesFreed: number;
@@ -6455,6 +6456,7 @@ export class LcmContextEngine implements ContextEngine {
     const runRuntimeAutoRotate = async (): Promise<void> => {
       await this.maybeAutoRotateManagedSessionFile({
         phase: "runtime",
+        caller: "maintain",
         sessionId: params.sessionId,
         sessionKey: params.sessionKey,
         sessionFile: params.sessionFile,
@@ -6893,6 +6895,7 @@ export class LcmContextEngine implements ContextEngine {
     const runRuntimeAutoRotate = async (): Promise<void> => {
       await this.maybeAutoRotateManagedSessionFile({
         phase: "runtime",
+        caller: "after-turn",
         sessionId: params.sessionId,
         sessionKey: params.sessionKey,
         sessionFile: params.sessionFile,
@@ -7863,6 +7866,7 @@ export class LcmContextEngine implements ContextEngine {
   /** Check one LCM-managed transcript and rotate it when policy allows. */
   private async maybeAutoRotateManagedSessionFile(params: {
     phase: AutoRotateSessionFilePhase;
+    caller?: AutoRotateSessionFileCaller;
     sessionId?: string;
     sessionKey?: string;
     sessionFile?: string;
@@ -7901,6 +7905,10 @@ export class LcmContextEngine implements ContextEngine {
     const mode = this.getAutoRotateSessionFileMode(params.phase);
     if (mode === "off") {
       skip("mode-off");
+      return;
+    }
+    if (params.phase === "runtime" && params.caller === "maintain" && mode === "rotate") {
+      skip("runtime-maintenance-rotation-deferred-to-after-turn");
       return;
     }
     if (!this.info.ownsCompaction) {
