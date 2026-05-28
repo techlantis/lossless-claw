@@ -3939,6 +3939,50 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(existsSync(latestBackupPath)).toBe(false);
   });
 
+  it("does not rewrite oversized session files from maintain runtime checks", async () => {
+    const sessionFile = createSessionFilePath("auto-rotate-maintain-active-turn");
+    createBulkySession(sessionFile, 14);
+    const original = readFileSync(sessionFile, "utf8");
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const engine = createEngineWithDeps(
+      {
+        freshTailCount: 1,
+        autoRotateSessionFiles: {
+          enabled: true,
+          createBackups: false,
+          sizeBytes: 1_500,
+          startup: "off",
+          runtime: "rotate",
+        },
+      },
+      { log },
+    );
+    const sessionId = "auto-rotate-maintain-active-turn-session";
+    const sessionKey = "agent:main:test:auto-rotate-maintain-active-turn";
+
+    await engine.bootstrap({ sessionId, sessionKey, sessionFile });
+    await engine.maintain({
+      sessionId,
+      sessionKey,
+      sessionFile,
+      runtimeContext: {},
+    });
+
+    expect(readFileSync(sessionFile, "utf8")).toBe(original);
+    const autoRotateLogs = log.info.mock.calls.map(([message]) => String(message));
+    expect(autoRotateLogs).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("phase=runtime action=skip"),
+        expect.stringContaining("reason=runtime-maintenance-rotation-deferred-to-after-turn"),
+      ]),
+    );
+  });
+
   it("leaves below-threshold session files alone while logging the decision", async () => {
     const sessionFile = createSessionFilePath("auto-rotate-below-threshold");
     const messages = createBulkySession(sessionFile, 4);
