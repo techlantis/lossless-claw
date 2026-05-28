@@ -9735,8 +9735,14 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(assembleResult.messages).toHaveLength(1);
   });
 
-  it("assemble() consumes pending threshold debt before returning context when already over budget", async () => {
-    const engine = createEngine();
+  it("assemble() drains pending threshold debt as an emergency when already over budget", async () => {
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const engine = createEngineWithDepsOverrides({ log });
     const privateEngine = engine as unknown as {
       executeCompactionCore: (params: unknown) => Promise<unknown>;
     };
@@ -9779,6 +9785,12 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(maintenance?.pending).toBe(false);
     expect(maintenance?.running).toBe(false);
     expect(assembleResult.messages).toHaveLength(1);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "[lcm] assemble: emergency deferred compaction debt draining pre-assembly",
+      ),
+    );
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("reason=over-budget"));
   });
 
   it("assemble() does not wait for the session queue when deferred threshold debt is not urgent", async () => {
