@@ -5908,6 +5908,77 @@ describe("LcmContextEngine.assemble canonical path", () => {
     });
   });
 
+  it("adds raw prompt-recall matches when summary-covered history omits an exact memory key", async () => {
+    const engine = createEngine();
+    const sessionId = "session-prompt-recall-after-rotate";
+
+    await engine.ingest({
+      sessionId,
+      message: {
+        role: "user",
+        content: "Reply with this exact memory marker: CRABPOT_LCM_FACT is blue-lantern-42.",
+      } as AgentMessage,
+    });
+    await engine.ingest({
+      sessionId,
+      message: { role: "assistant", content: "CRABPOT_LCM_FACT is blue-lantern-42." } as AgentMessage,
+    });
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: "Say one neutral filler response." } as AgentMessage,
+    });
+    await engine.ingest({
+      sessionId,
+      message: { role: "assistant", content: "ok" } as AgentMessage,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationForSession({ sessionId });
+    expect(conversation).toBeTruthy();
+    const messages = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    const summaryStore = engine.getSummaryStore();
+    await summaryStore.insertSummary({
+      summaryId: "sum_prompt_recall_omits_exact_key",
+      conversationId: conversation!.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: "Older setup turn established a recall fact, but this summary omits the exact key.",
+      tokenCount: estimateTokens("Older setup turn established a recall fact."),
+    });
+    await summaryStore.linkSummaryToMessages(
+      "sum_prompt_recall_omits_exact_key",
+      messages.slice(0, 2).map((message) => message.messageId),
+    );
+    await summaryStore.replaceContextRangeWithSummary({
+      conversationId: conversation!.conversationId,
+      startOrdinal: 0,
+      endOrdinal: 1,
+      summaryId: "sum_prompt_recall_omits_exact_key",
+    });
+
+    const result = await engine.assemble({
+      sessionId,
+      messages: [
+        {
+          role: "user",
+          content: "What is CRABPOT_LCM_FACT? Answer with only the remembered value.",
+        },
+      ] as AgentMessage[],
+      prompt: "What is CRABPOT_LCM_FACT? Answer with only the remembered value.",
+      tokenBudget: 10_000,
+    });
+
+    const rendered = result.messages.map((message) =>
+      typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+    );
+    expect(
+      rendered.some(
+        (content) =>
+          content.includes("<lossless_claw_prompt_recall>") &&
+          content.includes("CRABPOT_LCM_FACT is blue-lantern-42"),
+      ),
+    ).toBe(true);
+  });
+
   it("logs the emitted context projection epoch", async () => {
     const infoLog = vi.fn();
     const engine = createEngineWithDepsOverrides({

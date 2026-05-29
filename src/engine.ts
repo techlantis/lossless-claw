@@ -1193,6 +1193,11 @@ type StoredMessage = {
   tokenCount: number;
 };
 
+const PROMPT_RECALL_IDENTIFIER_PATTERN = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g;
+const PROMPT_RECALL_MAX_IDENTIFIERS = 4;
+const PROMPT_RECALL_MAX_MESSAGES = 4;
+const PROMPT_RECALL_MAX_MESSAGE_CHARS = 1200;
+
 /**
  * Normalize AgentMessage variants into the storage shape used by LCM.
  */
@@ -1225,6 +1230,37 @@ function toStoredMessage(message: AgentMessage): StoredMessage {
     content,
     tokenCount,
   };
+}
+
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractPromptRecallIdentifiers(prompt?: string): string[] {
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    return [];
+  }
+  return [...new Set(prompt.match(PROMPT_RECALL_IDENTIFIER_PATTERN) ?? [])].slice(
+    0,
+    PROMPT_RECALL_MAX_IDENTIFIERS,
+  );
+}
+
+function renderPromptRecallMessage(params: {
+  identifier: string;
+  role: StoredMessage["role"];
+  content: string;
+}): string {
+  const singleLine = normalizePromptRecallText(params.content);
+  const clipped =
+    singleLine.length > PROMPT_RECALL_MAX_MESSAGE_CHARS
+      ? `${singleLine.slice(0, PROMPT_RECALL_MAX_MESSAGE_CHARS)}...`
+      : singleLine;
+  return `- ${params.role} matched ${params.identifier}: ${clipped}`;
+}
+
+function normalizePromptRecallText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function createBootstrapEntryHash(message: StoredMessage | null): string | null {
@@ -7221,6 +7257,75 @@ export class LcmContextEngine implements ContextEngine {
     await runRuntimeAutoRotate();
   }
 
+  private async buildPromptRecallCue(params: {
+    conversationId: number;
+    prompt?: string;
+    assembledMessages: AgentMessage[];
+  }): Promise<{ message: AgentMessage; tokenCount: number; matchedMessages: number } | null> {
+    const identifiers = extractPromptRecallIdentifiers(params.prompt);
+    if (identifiers.length === 0) {
+      return null;
+    }
+
+    const assembledText = params.assembledMessages
+      .map((message) => "content" in message ? extractMessageContent(message.content) : "")
+      .join("\n");
+    const normalizedAssembledText = normalizePromptRecallText(assembledText);
+
+    const renderedMatches: string[] = [];
+    const seenMessageIds = new Set<number>();
+    for (const identifier of identifiers) {
+      const matches = await this.conversationStore.searchMessages({
+        conversationId: params.conversationId,
+        query: escapeRegexLiteral(identifier),
+        mode: "regex",
+        limit: PROMPT_RECALL_MAX_MESSAGES,
+      });
+      for (const match of matches) {
+        if (seenMessageIds.has(match.messageId)) {
+          continue;
+        }
+        const stored = await this.conversationStore.getMessageById(match.messageId);
+        if (!stored?.content.trim()) {
+          continue;
+        }
+        if (normalizedAssembledText.includes(normalizePromptRecallText(stored.content))) {
+          continue;
+        }
+        seenMessageIds.add(match.messageId);
+        renderedMatches.push(
+          renderPromptRecallMessage({
+            identifier,
+            role: stored.role,
+            content: stored.content,
+          }),
+        );
+        if (renderedMatches.length >= PROMPT_RECALL_MAX_MESSAGES) {
+          break;
+        }
+      }
+      if (renderedMatches.length >= PROMPT_RECALL_MAX_MESSAGES) {
+        break;
+      }
+    }
+
+    if (renderedMatches.length === 0) {
+      return null;
+    }
+
+    const content = [
+      "<lossless_claw_prompt_recall>",
+      "Stored raw history matches the current prompt, but the active summary/tail omitted these exact keys:",
+      ...renderedMatches,
+      "</lossless_claw_prompt_recall>",
+    ].join("\n");
+    return {
+      message: { role: "user", content } as AgentMessage,
+      tokenCount: estimateTokens(content),
+      matchedMessages: renderedMatches.length,
+    };
+  }
+
   async assemble(params: {
     sessionId: string;
     sessionKey?: string;
@@ -7347,16 +7452,30 @@ export class LcmContextEngine implements ContextEngine {
         return safeFallback();
       }
 
-      const volatileLiveInputAppend = appendUncoveredVolatileLiveInputsWithinBudget({
+      const promptRecallCue = await this.buildPromptRecallCue({
+        conversationId: conversation.conversationId,
+        prompt: params.prompt,
         assembledMessages: assembled.messages,
-        assembledEstimatedTokens: assembled.estimatedTokens,
+      });
+      const assembledMessages = promptRecallCue
+        ? [promptRecallCue.message, ...assembled.messages]
+        : assembled.messages;
+      const assembledEstimatedTokens = assembled.estimatedTokens + (promptRecallCue?.tokenCount ?? 0);
+      const protectedAssembledIndexes = resolveProtectedFreshTailAssembledIndexes({
+        assembledMessages,
+        freshTailMessageHashes:
+          assembled.debug?.freshTailProtectionMessageHashes ??
+          assembled.debug?.preSanitizeFreshTailMessageHashes,
+      });
+      if (promptRecallCue) {
+        protectedAssembledIndexes.add(0);
+      }
+
+      const volatileLiveInputAppend = appendUncoveredVolatileLiveInputsWithinBudget({
+        assembledMessages,
+        assembledEstimatedTokens,
         liveMessages: params.messages,
-        protectedAssembledIndexes: resolveProtectedFreshTailAssembledIndexes({
-          assembledMessages: assembled.messages,
-          freshTailMessageHashes:
-            assembled.debug?.freshTailProtectionMessageHashes ??
-            assembled.debug?.preSanitizeFreshTailMessageHashes,
-        }),
+        protectedAssembledIndexes,
         tokenBudget,
       });
       if (volatileLiveInputAppend.appendedMessages > 0) {
@@ -7383,8 +7502,11 @@ export class LcmContextEngine implements ContextEngine {
       const volatileLiveInputLog = volatileLiveInputAppend.appendedMessages > 0
         ? ` volatileLiveInputsAppended=${volatileLiveInputAppend.appendedMessages} volatileLiveInputEvicted=${volatileLiveInputAppend.evictedMessages} volatileLiveInputOverBudget=${volatileLiveInputAppend.overBudget}`
         : "";
+      const promptRecallLog = promptRecallCue
+        ? ` promptRecallMatches=${promptRecallCue.matchedMessages}`
+        : "";
       this.deps.log.info(
-        `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} summaryContextItems=${summaryContextItems} hasSummaryItems=${hasSummaryItems} inputMessages=${params.messages.length} outputMessages=${volatileLiveInputAppend.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${volatileLiveInputAppend.estimatedTokens} contextProjectionMode=thread_bootstrap contextProjectionEpoch=${contextProjectionEpoch}${stubStatsLog}${volatileLiveInputLog} duration=${formatDurationMs(Date.now() - startedAt)}`,
+        `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} summaryContextItems=${summaryContextItems} hasSummaryItems=${hasSummaryItems} inputMessages=${params.messages.length} outputMessages=${volatileLiveInputAppend.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${volatileLiveInputAppend.estimatedTokens} contextProjectionMode=thread_bootstrap contextProjectionEpoch=${contextProjectionEpoch}${stubStatsLog}${volatileLiveInputLog}${promptRecallLog} duration=${formatDurationMs(Date.now() - startedAt)}`,
 
       );
       const prefixChange = describeAssembledPrefixChange(
