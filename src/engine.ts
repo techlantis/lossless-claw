@@ -3396,8 +3396,9 @@ export class LcmContextEngine implements ContextEngine {
   /**
    * Consume durable threshold debt only when the session queue is idle.
    *
-   * Any skipped busy-queue attempt leaves the maintenance row pending for
-   * assemble() or a later host-approved maintain() pass.
+   * Any skipped busy-queue attempt leaves the maintenance row pending for a
+   * later idle drain, host-approved maintain() pass, or emergency assemble()
+   * fallback if the live prompt is already over budget.
    */
   private async drainDeferredCompactionDebtIfIdle(
     params: DeferredCompactionDebtDrainParams & { queueKey: string },
@@ -3580,8 +3581,12 @@ export class LcmContextEngine implements ContextEngine {
   }
 
   /**
-   * Re-check and consume deferred debt for assemble() while holding the
-   * session queue so pre-assembly writes cannot race queued maintenance.
+   * Consume deferred debt for assemble() only after the caller has established
+   * that the live prompt is already over budget. Routine threshold debt is
+   * drained after turns or by host-approved maintain() calls so the next user
+   * turn is not held hostage by proactive compaction work. Hitting this path
+   * means idle/background maintenance did not catch up before the prompt became
+   * unusable, so callers should treat it as an emergency safeguard.
    */
   private async maybeConsumeDeferredCompactionDebtForAssemble(params: {
     conversationId: number;
@@ -7273,17 +7278,33 @@ export class LcmContextEngine implements ContextEngine {
         conversation.conversationId,
       );
       if (maintenance?.pending || maintenance?.running) {
-        try {
-          await this.maybeConsumeDeferredCompactionDebtForAssemble({
-            conversationId: conversation.conversationId,
-            sessionId: params.sessionId,
-            sessionKey: params.sessionKey,
-            tokenBudget,
-            currentTokenCount: liveContextTokens,
-          });
-        } catch (error) {
+        const recordedContextTokens = this.normalizeObservedTokenCount(
+          maintenance.currentTokenCount ?? undefined,
+        );
+        const emergencyContextTokens = Math.max(
+          liveContextTokens,
+          recordedContextTokens ?? 0,
+        );
+        if (emergencyContextTokens > tokenBudget) {
           this.deps.log.warn(
-            `[lcm] assemble: deferred compaction execution failed for ${sessionLabel}: ${describeLogError(error)}`,
+            `[lcm] assemble: emergency deferred compaction debt draining pre-assembly conversation=${conversation.conversationId} ${sessionLabel} currentTokenCount=${emergencyContextTokens} tokenBudget=${tokenBudget} reason=over-budget`,
+          );
+          try {
+            await this.maybeConsumeDeferredCompactionDebtForAssemble({
+              conversationId: conversation.conversationId,
+              sessionId: params.sessionId,
+              sessionKey: params.sessionKey,
+              tokenBudget,
+              currentTokenCount: emergencyContextTokens,
+            });
+          } catch (error) {
+            this.deps.log.warn(
+              `[lcm] assemble: deferred compaction execution failed for ${sessionLabel}: ${describeLogError(error)}`,
+            );
+          }
+        } else {
+          this.deps.log.debug(
+            `[lcm] assemble: deferred compaction debt left pending conversation=${conversation.conversationId} ${sessionLabel} currentTokenCount=${emergencyContextTokens} tokenBudget=${tokenBudget} reason=not-over-budget`,
           );
         }
       }
