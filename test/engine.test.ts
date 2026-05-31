@@ -6500,6 +6500,113 @@ describe("LcmContextEngine.assemble canonical path", () => {
     expect(rendered.some((content) => content.includes("redacted-test-value"))).toBe(false);
   });
 
+  it("does not add prompt-recall snippets that include underscore provider tokens", async () => {
+    const engine = createEngine();
+    const sessionId = "session-prompt-recall-underscore-provider-token";
+    const prompt = "What is PROJECT_ID?";
+    const fakeLiveKey = ["sk", "live", "a".repeat(24)].join("_");
+    const { liveMessages } = await seedPromptRecallFixture({
+      engine,
+      sessionId,
+      summaryId: "sum_prompt_recall_underscore_provider_token",
+      summaryContent: "Older setup turn established a project fact, but this summary omits the exact key.",
+      memoryUserContent: `PROJECT_ID is launch-alpha; ${fakeLiveKey}.`,
+      memoryAssistantContent: "ok",
+      prompt,
+    });
+
+    const result = await engine.assemble({
+      sessionId,
+      messages: liveMessages,
+      prompt,
+      tokenBudget: 10_000,
+    });
+
+    const rendered = result.messages.map((message) =>
+      typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+    );
+    expect(rendered.some((content) => content.includes("<lossless_claw_prompt_recall>"))).toBe(false);
+    expect(rendered.some((content) => content.includes(fakeLiveKey))).toBe(false);
+  });
+
+  it("continues prompt-recall search past filtered newer matches", async () => {
+    const engine = createEngine();
+    const sessionId = "session-prompt-recall-filtered-starvation";
+    const prompt = "What is STARVED_FACT?";
+
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: "STARVED_FACT is blue-lantern-42." } as AgentMessage,
+    });
+    for (let index = 0; index < 8; index += 1) {
+      await engine.ingest({
+        sessionId,
+        message: {
+          role: "user",
+          content: `STARVED_FACT candidate ${index}; API_KEY is redacted-test-value-${index}.`,
+        } as AgentMessage,
+      });
+    }
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: "Say one neutral filler response." } as AgentMessage,
+    });
+    await engine.ingest({
+      sessionId,
+      message: { role: "assistant", content: "ok" } as AgentMessage,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationForSession({ sessionId });
+    expect(conversation).toBeTruthy();
+    const messages = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    const summaryStore = engine.getSummaryStore();
+    await summaryStore.insertSummary({
+      summaryId: "sum_prompt_recall_filtered_starvation",
+      conversationId: conversation!.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: "Older setup turns established a recall fact, but this summary omits the exact key.",
+      tokenCount: estimateTokens("Older setup turns established a recall fact."),
+    });
+    await summaryStore.linkSummaryToMessages(
+      "sum_prompt_recall_filtered_starvation",
+      messages.slice(0, 9).map((message) => message.messageId),
+    );
+    await summaryStore.replaceContextRangeWithSummary({
+      conversationId: conversation!.conversationId,
+      startOrdinal: 0,
+      endOrdinal: 8,
+      summaryId: "sum_prompt_recall_filtered_starvation",
+    });
+    const rankedMatches = [...messages.slice(1, 9).reverse(), messages[0]].map((message) => ({
+      messageId: message.messageId,
+      conversationId: conversation!.conversationId,
+      role: message.role,
+      snippet: message.content,
+      createdAt: message.createdAt,
+      rank: 0,
+    }));
+    vi.spyOn(engine.getConversationStore(), "searchMessages").mockImplementation(async (input) =>
+      rankedMatches.slice(0, input.limit ?? rankedMatches.length),
+    );
+
+    const result = await engine.assemble({
+      sessionId,
+      messages: [{ role: "user", content: prompt }] as AgentMessage[],
+      prompt,
+      tokenBudget: 10_000,
+    });
+
+    const rendered = result.messages.map((message) =>
+      typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+    );
+    const recallCue = rendered.find((content) => content.includes("<lossless_claw_prompt_recall>"));
+    expect(recallCue).toEqual(expect.any(String));
+    expect(recallCue).toContain("STARVED_FACT is blue-lantern-42");
+    expect(recallCue).not.toContain("API_KEY");
+    expect(recallCue).not.toContain("redacted-test-value");
+  });
+
   it("recalls multiple requested identifiers from the same historical message", async () => {
     const engine = createEngine();
     const sessionId = "session-prompt-recall-same-message-identifiers";

@@ -1198,10 +1198,11 @@ const PROMPT_RECALL_MAX_IDENTIFIERS = 4;
 const PROMPT_RECALL_MAX_MESSAGES = 4;
 const PROMPT_RECALL_MAX_MESSAGE_CHARS = 1200;
 const PROMPT_RECALL_SEARCH_LIMIT = PROMPT_RECALL_MAX_MESSAGES * 2;
+const PROMPT_RECALL_SEARCH_CANDIDATE_LIMIT = PROMPT_RECALL_SEARCH_LIMIT * 4;
 const PROMPT_RECALL_SENSITIVE_IDENTIFIER_PATTERN =
   /(?:^|[^A-Za-z0-9])(?:ACCESS_?KEY|API_?KEY|AUTH|CREDENTIALS?|DEPLOY_?KEY|KEY|PASS(?:WORD)?|PRIVATE_?KEY|SECRET|TOKEN)(?=$|[^A-Za-z0-9])/i;
 const PROMPT_RECALL_SENSITIVE_VALUE_PATTERN =
-  /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{10,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}\b|\b(?:sk|rk|pk)-[A-Za-z0-9_-]{10,}\b)/i;
+  /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{10,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}\b|\b(?:sk|rk|pk)-[A-Za-z0-9_-]{10,}\b|\b(?:sk|rk|pk)_[A-Za-z0-9_]{10,}\b)/i;
 
 /**
  * Normalize AgentMessage variants into the storage shape used by LCM.
@@ -7400,7 +7401,7 @@ export class LcmContextEngine implements ContextEngine {
         conversationId: params.conversationId,
         query: identifier,
         mode: "full_text",
-        limit: PROMPT_RECALL_SEARCH_LIMIT,
+        limit: PROMPT_RECALL_SEARCH_CANDIDATE_LIMIT,
         sort: "recency",
       });
       for (const match of matches) {
