@@ -10475,6 +10475,127 @@ describe("LcmContextEngine fidelity and token budget", () => {
     expect(checkpoint?.lastProcessedOffset).toBe(statSync(newSessionFile).size);
   });
 
+  it("bootstrap preserves a long-lived checkpoint when a rotated transcript is only delivery audit traffic", async () => {
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      {
+        log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() },
+      },
+    );
+    const sessionId = "bootstrap-delivery-only-path-mismatch";
+    const sessionKey = "agent:main:signal:direct:delivery-only";
+
+    const oldSessionFile = createSessionFilePath("bootstrap-delivery-only-old");
+    writeLeafTranscript(oldSessionFile, [
+      { role: "user", content: "long-lived DM question" },
+      { role: "assistant", content: "long-lived DM answer" },
+    ]);
+    await engine.bootstrap({
+      sessionId,
+      sessionKey,
+      sessionFile: oldSessionFile,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    expect(conversation).not.toBeNull();
+    const oldCheckpoint = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(oldCheckpoint?.sessionFilePath).toBe(oldSessionFile);
+
+    const newSessionFile = createSessionFilePath("bootstrap-delivery-only-new");
+    writeLeafTranscript(newSessionFile, [
+      { role: "system", content: "delivery-mirror config-audit: refreshed host policy" },
+      { role: "system", content: "config-audit delivery-mirror: no user turn" },
+    ]);
+
+    const result = await engine.bootstrap({
+      sessionId,
+      sessionKey,
+      sessionFile: newSessionFile,
+    });
+
+    expect(result).toEqual({
+      bootstrapped: false,
+      importedMessages: 0,
+      reason: "already bootstrapped",
+    });
+    expect(
+      warnLog.mock.calls
+        .map((call) => String(call[0]))
+        .some((message) => message.includes("delivery-only path-mismatched transcript")),
+    ).toBe(true);
+
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((message) => message.content)).toEqual([
+      "long-lived DM question",
+      "long-lived DM answer",
+    ]);
+
+    const checkpoint = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(checkpoint).toEqual(oldCheckpoint);
+  });
+
+  it("bootstrap imports real path-mismatched user turns that mention config audit", async () => {
+    const engine = createEngine();
+    const sessionId = "bootstrap-real-config-audit-path-mismatch";
+    const sessionKey = "agent:main:test:direct:real-config-audit";
+
+    const oldSessionFile = createSessionFilePath("bootstrap-real-config-audit-old");
+    writeLeafTranscript(oldSessionFile, [
+      { role: "user", content: "old config-audit setup question" },
+      { role: "assistant", content: "old config-audit setup answer" },
+    ]);
+    await engine.bootstrap({
+      sessionId,
+      sessionKey,
+      sessionFile: oldSessionFile,
+    });
+
+    const newSessionFile = createSessionFilePath("bootstrap-real-config-audit-new");
+    writeLeafTranscript(newSessionFile, [
+      { role: "user", content: "please run a config audit for this deployment" },
+      { role: "assistant", content: "config audit result: deployment policy is current" },
+    ]);
+
+    const result = await engine.bootstrap({
+      sessionId,
+      sessionKey,
+      sessionFile: newSessionFile,
+    });
+
+    expect(result).toEqual({
+      bootstrapped: true,
+      importedMessages: 2,
+      reason: "reconciled missing session messages",
+    });
+
+    const conversation = await engine.getConversationStore().getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    expect(conversation).not.toBeNull();
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((message) => message.content)).toEqual([
+      "old config-audit setup question",
+      "old config-audit setup answer",
+      "please run a config audit for this deployment",
+      "config audit result: deployment policy is current",
+    ]);
+
+    const checkpoint = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(checkpoint?.sessionFilePath).toBe(newSessionFile);
+    expect(checkpoint?.lastProcessedOffset).toBe(statSync(newSessionFile).size);
+  });
+
   it("afterTurn reconciles a path-mismatched no-anchor transcript before oversized delta dedup", async () => {
     const engine = createEngine();
     const sessionId = "after-turn-transcript-epoch-no-anchor";
@@ -10558,6 +10679,99 @@ describe("LcmContextEngine fidelity and token budget", () => {
       .getConversationBootstrapState(conversation!.conversationId);
     expect(checkpoint?.sessionFilePath).toBe(newSessionFile);
     expect(checkpoint?.lastProcessedOffset).toBe(statSync(newSessionFile).size);
+  });
+
+  it("afterTurn preserves continuity when a path-mismatched transcript is only delivery audit traffic", async () => {
+    const warnLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {},
+      {
+        log: { info: vi.fn(), warn: warnLog, error: vi.fn(), debug: vi.fn() },
+      },
+    );
+    const sessionId = "after-turn-delivery-only-path-mismatch";
+    const sessionKey = "agent:main:signal:direct:after-turn-delivery-only";
+
+    const privateEngine = engine as unknown as {
+      compaction: {
+        evaluateLeafTrigger: (conversationId: number) => Promise<unknown>;
+        evaluate: (
+          conversationId: number,
+          tokenBudget: number,
+          observed?: number,
+        ) => Promise<unknown>;
+      };
+    };
+    vi.spyOn(privateEngine.compaction, "evaluateLeafTrigger").mockResolvedValue({
+      shouldCompact: false,
+      rawTokensOutsideTail: 0,
+      threshold: 20_000,
+    });
+    vi.spyOn(privateEngine.compaction, "evaluate").mockResolvedValue({
+      shouldCompact: false,
+      reason: "below threshold",
+      currentTokens: 0,
+      threshold: 3_072,
+    });
+
+    const oldSessionFile = createSessionFilePath("after-turn-delivery-only-old");
+    writeLeafTranscript(oldSessionFile, [
+      { role: "user", content: "long-lived afterTurn DM question" },
+      { role: "assistant", content: "long-lived afterTurn DM answer" },
+    ]);
+    await engine.afterTurn({
+      sessionId,
+      sessionKey,
+      sessionFile: oldSessionFile,
+      messages: [
+        makeMessage({ role: "user", content: "long-lived afterTurn DM question" }),
+        makeMessage({ role: "assistant", content: "long-lived afterTurn DM answer" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationForSession({
+      sessionId,
+      sessionKey,
+    });
+    expect(conversation).not.toBeNull();
+    const oldCheckpoint = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(oldCheckpoint?.sessionFilePath).toBe(oldSessionFile);
+
+    const newSessionFile = createSessionFilePath("after-turn-delivery-only-new");
+    writeLeafTranscript(newSessionFile, [
+      { role: "system", content: "delivery-mirror config-audit: refreshed host policy" },
+      { role: "system", content: "config-audit delivery-mirror: no user turn" },
+    ]);
+
+    await engine.afterTurn({
+      sessionId,
+      sessionKey,
+      sessionFile: newSessionFile,
+      messages: [makeMessage({ role: "assistant", content: "assistant delta without foreground user" })],
+      prePromptMessageCount: 0,
+      tokenBudget: 4_096,
+    });
+
+    expect(
+      warnLog.mock.calls
+        .map((call) => String(call[0]))
+        .some((message) => message.includes("delivery-only path-mismatched transcript")),
+    ).toBe(true);
+
+    const stored = await engine.getConversationStore().getMessages(conversation!.conversationId);
+    expect(stored.map((message) => message.content)).toEqual([
+      "long-lived afterTurn DM question",
+      "long-lived afterTurn DM answer",
+    ]);
+
+    const checkpoint = await engine
+      .getSummaryStore()
+      .getConversationBootstrapState(conversation!.conversationId);
+    expect(checkpoint).toEqual(oldCheckpoint);
   });
 
   it("afterTurn archives a stale active conversation when the prior keyed transcript was pruned", async () => {

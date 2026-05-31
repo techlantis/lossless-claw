@@ -1212,6 +1212,8 @@ const PROMPT_RECALL_MAX_MESSAGES = 4;
 const PROMPT_RECALL_MAX_MESSAGE_CHARS = 1200;
 const PROMPT_RECALL_SEARCH_LIMIT = PROMPT_RECALL_MAX_MESSAGES * 2;
 const PROMPT_RECALL_SEARCH_CANDIDATE_LIMIT = PROMPT_RECALL_SEARCH_LIMIT * 4;
+const DELIVERY_ONLY_TRANSCRIPT_MAX_MESSAGES = 4;
+const INJECTED_DELIVERY_TRANSCRIPT_PATTERN = /\b(?:delivery[-_\s]?mirror|config[-_\s]?audit)\b/i;
 const PROMPT_RECALL_SENSITIVE_IDENTIFIER_PATTERN =
   /(?:^|[^A-Za-z0-9])(?:ACCESS_?KEY|API_?KEY|AUTH|CREDENTIALS?|DEPLOY_?KEY|KEY|PASS(?:WORD)?|PRIVATE_?KEY|SECRET|TOKEN)(?=$|[^A-Za-z0-9])/i;
 const PROMPT_RECALL_SENSITIVE_VALUE_PATTERN =
@@ -1249,6 +1251,19 @@ function toStoredMessage(message: AgentMessage): StoredMessage {
     content,
     tokenCount,
   };
+}
+
+function isLikelyInjectedDeliveryMessage(message: AgentMessage): boolean {
+  const stored = toStoredMessage(message);
+  return stored.role === "system" && INJECTED_DELIVERY_TRANSCRIPT_PATTERN.test(stored.content);
+}
+
+function isLikelyInjectedDeliveryOnlyTranscript(messages: AgentMessage[]): boolean {
+  return (
+    messages.length > 0 &&
+    messages.length <= DELIVERY_ONLY_TRANSCRIPT_MAX_MESSAGES &&
+    messages.every(isLikelyInjectedDeliveryMessage)
+  );
 }
 
 function escapeRegexLiteral(value: string): string {
@@ -5431,6 +5446,19 @@ export class LcmContextEngine implements ContextEngine {
 
       if (anchorIndex < 0) {
         if (params.allowNoAnchorImport) {
+          if (
+            params.noAnchorImportReason === "path-mismatch" &&
+            isLikelyInjectedDeliveryOnlyTranscript(historicalMessages)
+          ) {
+            this.deps.log.warn(
+              `[lcm] reconcileSessionTail: blocked delivery-only path-mismatched transcript for ${sessionContext}; preserving existing checkpoint because the rotated transcript contains only injected delivery/config traffic`,
+            );
+            this.deps.log.debug(
+              `[lcm] reconcileSessionTail: blocked delivery-only path mismatch for ${sessionContext} duration=${formatDurationMs(Date.now() - startedAt)} historicalMessages=${historicalMessages.length} overlap=false`,
+            );
+            return { blockedByImportCap: false, importedMessages: 0, hasOverlap: false };
+          }
+
           const replayAnalysis = await this.analyzePersistedTranscriptIdentityOverlaps({
             conversationId,
             messages: historicalMessages,
