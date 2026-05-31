@@ -2542,7 +2542,7 @@ describe("LcmContextEngine.ingest content extraction", () => {
     });
   });
 
-  it("maintain() requests transcript rewrites for summarized externalized tool results", async () => {
+  it("maintain() defers transcript GC until host-approved background maintenance", async () => {
     await withTempHome(async () => {
       const engine = createEngineWithConfig({
         largeFileTokenThreshold: 20,
@@ -2655,10 +2655,27 @@ describe("LcmContextEngine.ingest content extraction", () => {
         rewrittenEntries: request.replacements.length,
       }));
 
+      const deferred = await engine.maintain({
+        sessionId,
+        sessionFile,
+        runtimeContext: {
+          rewriteTranscriptEntries,
+        },
+      });
+
+      expect(deferred).toEqual({
+        changed: false,
+        bytesFreed: 0,
+        rewrittenEntries: 0,
+        reason: "transcript GC deferred until host-approved background maintenance",
+      });
+      expect(rewriteTranscriptEntries).not.toHaveBeenCalled();
+
       const result = await engine.maintain({
         sessionId,
         sessionFile,
         runtimeContext: {
+          allowDeferredCompactionExecution: true,
           rewriteTranscriptEntries,
         },
       });
@@ -3084,6 +3101,13 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(first).toEqual({ bootstrapped: true, importedMessages: 6 });
     await engineA.dispose();
 
+    const rawDb = createLcmDatabaseConnection(dbPath);
+    try {
+      rawDb.prepare(`UPDATE messages SET created_at = '2000-01-01 00:00:00'`).run();
+    } finally {
+      closeLcmConnection(rawDb);
+    }
+
     for (const answer of ["alpha", "gamma", "beta"]) {
       sm.appendMessage({
         role: "assistant",
@@ -3102,6 +3126,61 @@ describe("LcmContextEngine.bootstrap", () => {
 
     const after = await engineB.getConversationStore().getMessages(conversation!.conversationId);
     expect(after.slice(-3).map((message) => message.content)).toEqual(["alpha", "gamma", "beta"]);
+  });
+
+  it("keeps the replay flood guard active for user-leading append-only replay batches", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
+    tempDirs.push(tempDir);
+    const dbPath = join(tempDir, "lcm.db");
+    const sessionFile = createSessionFilePath("bootstrap-user-leading-replay");
+    const sm = SessionManager.open(sessionFile);
+    const sessionId = "bootstrap-user-leading-replay";
+
+    for (const [question, answer] of [
+      ["question 1", "alpha"],
+      ["question 2", "beta"],
+      ["question 3", "gamma"],
+    ] as const) {
+      sm.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: question }],
+      } as AgentMessage);
+      sm.appendMessage({
+        role: "assistant",
+        content: [{ type: "text", text: answer }],
+      } as AgentMessage);
+    }
+
+    const engineA = createEngineAtDatabasePath(dbPath);
+    const first = await engineA.bootstrap({ sessionId, sessionFile });
+    expect(first).toEqual({ bootstrapped: true, importedMessages: 6 });
+
+    const conversation = await engineA.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+    const before = await engineA.getConversationStore().getMessages(conversation!.conversationId);
+    await engineA.dispose();
+
+    const rawDb = createLcmDatabaseConnection(dbPath);
+    try {
+      rawDb.prepare(`UPDATE messages SET created_at = '2000-01-01 00:00:00'`).run();
+    } finally {
+      closeLcmConnection(rawDb);
+    }
+
+    for (const question of ["question 1", "question 2", "question 3"]) {
+      sm.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: question }],
+      } as AgentMessage);
+    }
+
+    const engineB = createEngineAtDatabasePath(dbPath);
+    await expect(engineB.bootstrap({ sessionId, sessionFile })).rejects.toThrow(
+      "[lcm] refused replay-like message batch",
+    );
+
+    const after = await engineB.getConversationStore().getMessages(conversation!.conversationId);
+    expect(after).toHaveLength(before.length);
   });
 
   it("skips reopening the transcript when checkpoint stats match", async () => {
@@ -3877,9 +3956,10 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(result.reason).toContain("could not rotate the current session transcript");
   });
 
-  it("auto-rotates oversized LCM-managed session files after runtime turns", async () => {
+  it("defers oversized session-file rewrites from afterTurn runtime hooks", async () => {
     const sessionFile = createSessionFilePath("auto-rotate-runtime");
     const messages = createBulkySession(sessionFile, 14);
+    const original = readFileSync(sessionFile, "utf8");
     const beforeSize = statSync(sessionFile).size;
     const databaseDir = mkdtempSync(join(tmpdir(), "lossless-claw-auto-rotate-db-"));
     tempDirs.push(databaseDir);
@@ -3919,24 +3999,80 @@ describe("LcmContextEngine.bootstrap", () => {
 
     const afterSize = statSync(sessionFile).size;
     expect(beforeSize).toBeGreaterThan(1_500);
-    expect(afterSize).toBeLessThan(beforeSize);
+    expect(afterSize).toBe(beforeSize);
+    expect(readFileSync(sessionFile, "utf8")).toBe(original);
     const autoRotateLogs = log.info.mock.calls
       .map(([message]) => String(message))
       .filter((message) => message.startsWith("[lcm] auto-rotate:"));
-    const rotateLog = autoRotateLogs.find((message) =>
-      message.includes("phase=runtime action=rotate"),
+    const skipLog = autoRotateLogs.find((message) =>
+      message.includes("phase=runtime action=skip"),
     );
-    expect(rotateLog).toContain(`sessionId=${sessionId}`);
-    expect(rotateLog).toContain(`sessionKey=${sessionKey}`);
-    expect(rotateLog).toContain(`sessionFile=${sessionFile}`);
-    expect(rotateLog).toContain("sizeBytes=");
-    expect(rotateLog).toContain("thresholdBytes=1500");
-    expect(rotateLog).toContain("durationMs=");
-    expect(rotateLog).not.toContain("backupPath=");
-    expect(rotateLog).toContain("bytesRemoved=");
-    expect(rotateLog).toContain("preservedTailMessageCount=1");
-    expect(rotateLog).toContain("checkpointSize=");
+    expect(skipLog).toContain(`sessionId=${sessionId}`);
+    expect(skipLog).toContain(`sessionKey=${sessionKey}`);
+    expect(skipLog).toContain(`sessionFile=${sessionFile}`);
+    expect(skipLog).toContain("sizeBytes=");
+    expect(skipLog).toContain("thresholdBytes=1500");
+    expect(skipLog).toContain("durationMs=");
+    expect(skipLog).toContain("reason=after-turn-session-file-rewrite-deferred-to-startup-or-manual-rotate");
+    expect(autoRotateLogs.some((message) => message.includes("phase=runtime action=rotate"))).toBe(false);
     expect(existsSync(latestBackupPath)).toBe(false);
+  });
+
+  it("does not directly auto-rotate session files during background maintenance", async () => {
+    const sessionFile = createSessionFilePath("auto-rotate-background-maintenance");
+    createBulkySession(sessionFile, 14);
+    const original = readFileSync(sessionFile, "utf8");
+    const beforeSize = statSync(sessionFile).size;
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const engine = createEngineWithDeps(
+      {
+        freshTailCount: 1,
+        autoRotateSessionFiles: {
+          enabled: true,
+          createBackups: false,
+          sizeBytes: 1_500,
+          startup: "off",
+          runtime: "rotate",
+        },
+      },
+      { log },
+    );
+    const sessionId = "auto-rotate-background-maintenance-session";
+    const sessionKey = "agent:main:test:auto-rotate-background-maintenance";
+
+    await engine.bootstrap({ sessionId, sessionKey, sessionFile });
+    await engine.maintain({
+      sessionId,
+      sessionKey,
+      sessionFile,
+      runtimeContext: {
+        allowDeferredCompactionExecution: true,
+      },
+    });
+
+    const afterSize = statSync(sessionFile).size;
+    expect(beforeSize).toBeGreaterThan(1_500);
+    expect(afterSize).toBe(beforeSize);
+    expect(readFileSync(sessionFile, "utf8")).toBe(original);
+    const autoRotateLogs = log.info.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.startsWith("[lcm] auto-rotate:"));
+    const skipLog = autoRotateLogs.find((message) =>
+      message.includes("phase=runtime action=skip"),
+    );
+    expect(skipLog).toContain(`sessionId=${sessionId}`);
+    expect(skipLog).toContain(`sessionKey=${sessionKey}`);
+    expect(skipLog).toContain(`sessionFile=${sessionFile}`);
+    expect(skipLog).toContain("sizeBytes=");
+    expect(skipLog).toContain("thresholdBytes=1500");
+    expect(skipLog).toContain("durationMs=");
+    expect(skipLog).toContain("reason=runtime-session-file-rewrite-deferred-to-startup-or-manual-rotate");
+    expect(autoRotateLogs.some((message) => message.includes("phase=runtime action=rotate"))).toBe(false);
   });
 
   it("does not rewrite oversized session files from maintain runtime checks", async () => {
@@ -3978,7 +4114,7 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(autoRotateLogs).toEqual(
       expect.arrayContaining([
         expect.stringContaining("phase=runtime action=skip"),
-        expect.stringContaining("reason=runtime-maintenance-rotation-deferred-to-after-turn"),
+        expect.stringContaining("reason=runtime-session-file-rewrite-deferred-to-startup-or-manual-rotate"),
       ]),
     );
   });
@@ -4380,9 +4516,10 @@ describe("LcmContextEngine.bootstrap", () => {
     expect(summaryLog).toContain("backupCreated=1");
   });
 
-  it("does not repeatedly rotate once the transcript has been compacted below threshold", async () => {
+  it("does not repeatedly rewrite oversized transcripts during runtime deferral", async () => {
     const sessionFile = createSessionFilePath("auto-rotate-no-loop");
-    const messages = createBulkySession(sessionFile, 14);
+    createBulkySession(sessionFile, 14);
+    const original = readFileSync(sessionFile, "utf8");
     const log = {
       info: vi.fn(),
       warn: vi.fn(),
@@ -4406,31 +4543,33 @@ describe("LcmContextEngine.bootstrap", () => {
     const sessionKey = "agent:main:test:auto-rotate-no-loop";
 
     await engine.bootstrap({ sessionId, sessionKey, sessionFile });
-    await engine.afterTurn({
+    await engine.maintain({
       sessionId,
       sessionKey,
       sessionFile,
-      messages,
-      prePromptMessageCount: messages.length,
+      runtimeContext: {
+        allowDeferredCompactionExecution: true,
+      },
     });
-    const compactedMessages = readSessionMessages(sessionFile);
-    await engine.afterTurn({
+    await engine.maintain({
       sessionId,
       sessionKey,
       sessionFile,
-      messages: compactedMessages,
-      prePromptMessageCount: compactedMessages.length,
+      runtimeContext: {
+        allowDeferredCompactionExecution: true,
+      },
     });
 
     const autoRotateLogs = log.info.mock.calls
       .map(([message]) => String(message))
       .filter((message) => message.startsWith("[lcm] auto-rotate:"));
+    expect(readFileSync(sessionFile, "utf8")).toBe(original);
+    expect(autoRotateLogs.filter((message) => message.includes("action=rotate"))).toHaveLength(0);
     expect(
-      autoRotateLogs.filter((message) => message.includes("action=rotate")),
-    ).toHaveLength(1);
-    expect(autoRotateLogs).toEqual(
-      expect.arrayContaining([expect.stringContaining("reason=below-threshold")]),
-    );
+      autoRotateLogs.filter((message) =>
+        message.includes("reason=runtime-session-file-rewrite-deferred-to-startup-or-manual-rotate"),
+      ),
+    ).toHaveLength(2);
   });
 
   it("reconciles missing tail messages when JSONL advanced past LCM", async () => {
