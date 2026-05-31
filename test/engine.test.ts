@@ -1003,6 +1003,28 @@ describe("ConversationStore session reuse", () => {
     const refreshed = await store.getConversation(conv1.conversationId);
     expect(refreshed?.sessionId).toBe("uuid-2");
   });
+
+  it("does not resolve archived conversations through active session lookup", async () => {
+    const engine = createEngine();
+    (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
+    const store = engine.getConversationStore();
+    const sessionId = "archived-lookup-session";
+    const sessionKey = "agent:main:test:archived-lookup";
+
+    const archived = await store.getOrCreateConversation(sessionId, { sessionKey });
+    await store.archiveConversation(archived.conversationId);
+
+    expect(
+      await store.getConversationForSession({
+        sessionId,
+        sessionKey,
+      }),
+    ).toBeNull();
+
+    const replacement = await store.getOrCreateConversation(sessionId, { sessionKey });
+    expect(replacement.conversationId).not.toBe(archived.conversationId);
+    expect(replacement.active).toBe(true);
+  });
 });
 
 describe("LcmContextEngine before_reset lifecycle", () => {

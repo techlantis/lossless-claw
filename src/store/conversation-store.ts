@@ -341,7 +341,7 @@ export class ConversationStore {
           const existing = await this.getConversationBySessionKey(input.sessionKey);
           if (existing) return existing;
         }
-        const existing = await this.getConversationBySessionId(input.sessionId);
+        const existing = await this.getActiveConversationBySessionId(input.sessionId);
         if (existing) return existing;
       }
       throw err;
@@ -366,6 +366,23 @@ export class ConversationStore {
        FROM conversations
        WHERE session_id = ?
        ORDER BY active DESC, created_at DESC
+       LIMIT 1`,
+      )
+      .get(sessionId) as unknown as ConversationRow | undefined;
+
+    return row ? toConversationRecord(row) : null;
+  }
+
+  private async getActiveConversationBySessionId(
+    sessionId: string,
+  ): Promise<ConversationRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT conversation_id, session_id, session_key, active, archived_at, title, bootstrapped_at, created_at, updated_at
+       FROM conversations
+       WHERE session_id = ?
+         AND active = 1
+       ORDER BY created_at DESC
        LIMIT 1`,
       )
       .get(sessionId) as unknown as ConversationRow | undefined;
@@ -446,7 +463,7 @@ export class ConversationStore {
       return null;
     }
 
-    return this.getConversationBySessionId(normalizedSessionId);
+    return this.getActiveConversationBySessionId(normalizedSessionId);
   }
 
   /** List active conversations that may own live session storage. */
@@ -489,7 +506,7 @@ export class ConversationStore {
       }
     }
 
-    const existing = await this.getConversationBySessionId(sessionId);
+    const existing = await this.getActiveConversationBySessionId(sessionId);
     if (existing) {
       if (!normalizedSessionKey) {
         return existing;
