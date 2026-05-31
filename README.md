@@ -10,6 +10,7 @@ Lossless Context Management plugin for [OpenClaw](https://github.com/openclaw/op
 - [Commands And Skill](#commands-and-skill)
 - [Documentation](#documentation)
 - [Development](#development)
+- [Security](#security)
 - [License](#license)
 
 ## What it does
@@ -496,6 +497,11 @@ tui/                        # Interactive terminal UI (Go)
   prompts/                  # Depth-aware prompt templates
 .goreleaser.yml             # GoReleaser config for TUI binary releases
 ```
+
+## Security
+
+Please report suspected vulnerabilities privately. See [SECURITY.md](SECURITY.md)
+for the supported disclosure process and response expectations.
 
 ## License
 
