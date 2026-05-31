@@ -5283,12 +5283,13 @@ export class LcmContextEngine implements ContextEngine {
       return { blockedByImportCap: false, importedMessages: 0, hasOverlap: true };
     }
 
-    const missingTail = await this.filterBootstrapReplayMessages({
+    const missingTailFiltered = await this.filterBootstrapReplayMessages({
       messages: historicalMessages.slice(anchorIndex + 1),
       sessionContext,
       source: "reconcileSessionTail",
       priorMessages: historicalMessages.slice(0, anchorIndex + 1),
     });
+    const missingTail = missingTailFiltered.messages;
 
     if (existingDbCount > 0 && missingTail.length > Math.max(existingDbCount * 0.2, 50)) {
       this.deps.log.warn(
@@ -5306,8 +5307,14 @@ export class LcmContextEngine implements ContextEngine {
     }
 
     let importedMessages = 0;
-    for (const message of missingTail) {
-      const result = await this.ingestSingle({ sessionId, sessionKey: params.sessionKey, message });
+    for (const [index, message] of missingTail.entries()) {
+      const result = await this.ingestSingle({
+        sessionId,
+        sessionKey: params.sessionKey,
+        message,
+        skipReplayTimestampFloodGuard:
+          index < missingTailFiltered.replayGuardExemptPrefixLength,
+      });
       if (result.ingested) {
         importedMessages += 1;
       }
@@ -5394,9 +5401,9 @@ export class LcmContextEngine implements ContextEngine {
     source: string;
     priorMessages?: AgentMessage[];
     sessionFile?: string;
-  }): Promise<AgentMessage[]> {
+  }): Promise<{ messages: AgentMessage[]; replayGuardExemptPrefixLength: number }> {
     if (params.messages.length < 3) {
-      return params.messages;
+      return { messages: params.messages, replayGuardExemptPrefixLength: 0 };
     }
 
     let replayCandidateLength = 0;
@@ -5407,14 +5414,14 @@ export class LcmContextEngine implements ContextEngine {
       replayCandidateLength += 1;
     }
     if (replayCandidateLength < 3) {
-      return params.messages;
+      return { messages: params.messages, replayGuardExemptPrefixLength: 0 };
     }
 
     const priorMessages =
       params.priorMessages ??
       (params.sessionFile ? await readLeafPathMessages(params.sessionFile) : undefined);
     if (!priorMessages || priorMessages.length === 0) {
-      return params.messages;
+      return { messages: params.messages, replayGuardExemptPrefixLength: 0 };
     }
 
     const replayCandidates = params.messages.slice(0, replayCandidateLength);
@@ -5422,7 +5429,7 @@ export class LcmContextEngine implements ContextEngine {
       params.priorMessages ? priorMessages : priorMessages.slice(0, Math.max(0, priorMessages.length - params.messages.length))
     ).filter(isBootstrapReplayCandidateMessage);
     if (earlierReplayCandidates.length < 3) {
-      return params.messages;
+      return { messages: params.messages, replayGuardExemptPrefixLength: 0 };
     }
 
     const incomingSignatures = replayCandidates.map(createBootstrapReplaySignature);
@@ -5460,9 +5467,17 @@ export class LcmContextEngine implements ContextEngine {
       );
     }
 
-    return replayPrefixLength > 0
-      ? params.messages.slice(replayPrefixLength)
-      : params.messages;
+    if (replayPrefixLength > 0) {
+      return {
+        messages: params.messages.slice(replayPrefixLength),
+        replayGuardExemptPrefixLength: Math.max(0, replayCandidateLength - replayPrefixLength),
+      };
+    }
+
+    return {
+      messages: params.messages,
+      replayGuardExemptPrefixLength: replayCandidateLength,
+    };
   }
 
   private async reconcileTranscriptTailForAfterTurn(params: {
@@ -5623,7 +5638,7 @@ export class LcmContextEngine implements ContextEngine {
               return reconcile;
             }
 
-            const replayFilteredMessages = await this.filterBootstrapReplayMessages({
+            const replayFiltered = await this.filterBootstrapReplayMessages({
               messages: appended.messages,
               sessionContext: this.formatSessionLogContext({
                 conversationId: conversation.conversationId,
@@ -5633,12 +5648,15 @@ export class LcmContextEngine implements ContextEngine {
               source: "afterTurn transcript reconcile append-only",
               sessionFile: params.sessionFile,
             });
+            const replayFilteredMessages = replayFiltered.messages;
             let importedMessages = 0;
-            for (const message of replayFilteredMessages) {
+            for (const [index, message] of replayFilteredMessages.entries()) {
               const result = await this.ingestSingle({
                 sessionId: params.sessionId,
                 sessionKey: params.sessionKey,
                 message,
+                skipReplayTimestampFloodGuard:
+                  index < replayFiltered.replayGuardExemptPrefixLength,
               });
               if (result.ingested) {
                 importedMessages += 1;
@@ -6138,7 +6156,7 @@ export class LcmContextEngine implements ContextEngine {
                   await this.conversationStore.markConversationBootstrapped(conversationId);
                 }
 
-                const replayFilteredMessages = await this.filterBootstrapReplayMessages({
+                const replayFiltered = await this.filterBootstrapReplayMessages({
                   messages: appended.messages,
                   sessionContext: this.formatSessionLogContext({
                     conversationId,
@@ -6148,13 +6166,16 @@ export class LcmContextEngine implements ContextEngine {
                   source: "bootstrap append-only",
                   sessionFile: params.sessionFile,
                 });
+                const replayFilteredMessages = replayFiltered.messages;
 
                 let importedMessages = 0;
-                for (const message of replayFilteredMessages) {
+                for (const [index, message] of replayFilteredMessages.entries()) {
                   const ingestResult = await this.ingestSingle({
                     sessionId: params.sessionId,
                     sessionKey: params.sessionKey,
                     message,
+                    skipReplayTimestampFloodGuard:
+                      index < replayFiltered.replayGuardExemptPrefixLength,
                   });
                   if (ingestResult.ingested) {
                     importedMessages += 1;
@@ -6650,6 +6671,8 @@ export class LcmContextEngine implements ContextEngine {
     sessionKey?: string;
     runtimeContext?: ContextEngineMaintenanceRuntimeContext;
   }): Promise<ContextEngineMaintenanceResult> {
+    const hostApprovedRuntimeMaintenance =
+      params.runtimeContext?.allowDeferredCompactionExecution === true;
     const runRuntimeAutoRotate = async (): Promise<void> => {
       await this.maybeAutoRotateManagedSessionFile({
         phase: "runtime",
@@ -6657,6 +6680,8 @@ export class LcmContextEngine implements ContextEngine {
         sessionId: params.sessionId,
         sessionKey: params.sessionKey,
         sessionFile: params.sessionFile,
+        allowSessionFileRewrite: false,
+        rewriteDeferralReason: "runtime-session-file-rewrite-deferred-to-startup-or-manual-rotate",
       });
     };
     if (this.shouldIgnoreSession({ sessionId: params.sessionId, sessionKey: params.sessionKey })) {
@@ -6702,7 +6727,7 @@ export class LcmContextEngine implements ContextEngine {
         const maintenance = await this.compactionMaintenanceStore.getConversationCompactionMaintenance(
           conversation.conversationId,
         );
-        if (params.runtimeContext?.allowDeferredCompactionExecution === true) {
+        if (hostApprovedRuntimeMaintenance) {
           const runtimeTokenBudget = (() => {
             const tokenBudget = asRecord(params.runtimeContext)?.tokenBudget;
             if (
@@ -6743,6 +6768,17 @@ export class LcmContextEngine implements ContextEngine {
               bytesFreed: 0,
               rewrittenEntries: 0,
               reason: "transcript GC disabled",
+            }
+          );
+        }
+
+        if (!hostApprovedRuntimeMaintenance) {
+          return (
+            deferredCompactionResult ?? {
+              changed: false,
+              bytesFreed: 0,
+              rewrittenEntries: 0,
+              reason: "transcript GC deferred until host-approved background maintenance",
             }
           );
         }
@@ -7096,6 +7132,8 @@ export class LcmContextEngine implements ContextEngine {
         sessionId: params.sessionId,
         sessionKey: params.sessionKey,
         sessionFile: params.sessionFile,
+        allowSessionFileRewrite: false,
+        rewriteDeferralReason: "after-turn-session-file-rewrite-deferred-to-startup-or-manual-rotate",
       });
     };
     if (this.shouldIgnoreSession({ sessionId: params.sessionId, sessionKey: params.sessionKey })) {
@@ -8122,6 +8160,8 @@ export class LcmContextEngine implements ContextEngine {
     sessionKey?: string;
     sessionFile?: string;
     conversationId?: number;
+    allowSessionFileRewrite?: boolean;
+    rewriteDeferralReason?: string;
   }): Promise<void> {
     const startedAt = Date.now();
     const thresholdBytes = this.config.autoRotateSessionFiles.sizeBytes;
@@ -8156,10 +8196,6 @@ export class LcmContextEngine implements ContextEngine {
     const mode = this.getAutoRotateSessionFileMode(params.phase);
     if (mode === "off") {
       skip("mode-off");
-      return;
-    }
-    if (params.phase === "runtime" && params.caller === "maintain" && mode === "rotate") {
-      skip("runtime-maintenance-rotation-deferred-to-after-turn");
       return;
     }
     if (!this.info.ownsCompaction) {
@@ -8257,6 +8293,10 @@ export class LcmContextEngine implements ContextEngine {
         reason: "above-threshold",
         level: "warn",
       });
+      return;
+    }
+    if (params.allowSessionFileRewrite === false) {
+      skip(params.rewriteDeferralReason ?? "session-file-rewrite-deferred", sizeBytes);
       return;
     }
 
