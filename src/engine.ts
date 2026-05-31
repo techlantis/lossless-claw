@@ -79,6 +79,7 @@ import {
 } from "./summarize.js";
 import type { CompleteFn, LcmDependencies, StartupSessionFileCandidate } from "./types.js";
 import { estimateTokens } from "./estimate-tokens.js";
+import { buildDeterministicFallbackSummary } from "./summary-fallback.js";
 import { createLcmDatabaseBackup } from "./plugin/lcm-db-backup.js";
 import {
   DatabaseTransactionTimeoutError,
@@ -11045,11 +11046,7 @@ function createEmergencyFallbackSummarize(): (
   aggressive?: boolean,
 ) => Promise<string> {
   return async (text: string, aggressive?: boolean): Promise<string> => {
-    const maxChars = aggressive ? 600 * 4 : 900 * 4;
-    if (text.length <= maxChars) {
-      return text;
-    }
-    return text.slice(0, maxChars) + "\n[Truncated for context management]";
+    return buildDeterministicFallbackSummary(text, aggressive ? 600 : 900);
   };
 }
 
