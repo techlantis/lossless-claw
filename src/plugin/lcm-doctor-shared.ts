@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { FALLBACK_DIRECTIVE_SUMMARY_MARKER } from "../summary-fallback.js";
 
 export const FALLBACK_SUMMARY_MARKER = "[LCM fallback summary; truncated for context management]";
 export const TRUNCATED_SUMMARY_PREFIX = "[Truncated from ";
@@ -56,6 +57,10 @@ type DoctorTargetRow = {
  * Detect broken summary markers that doctor should flag or repair.
  */
 export function detectDoctorMarker(content: string): DoctorMarkerKind | null {
+  if (content.startsWith(FALLBACK_DIRECTIVE_SUMMARY_MARKER)) {
+    return "fallback";
+  }
+
   if (content.startsWith(FALLBACK_SUMMARY_MARKER)) {
     return "old";
   }
@@ -67,6 +72,14 @@ export function detectDoctorMarker(content: string): DoctorMarkerKind | null {
 
   const fallbackIndex = content.indexOf(FALLBACK_SUMMARY_MARKER);
   if (fallbackIndex >= 0 && content.length - fallbackIndex < FALLBACK_SUMMARY_WINDOW) {
+    return "fallback";
+  }
+
+  const directiveFallbackIndex = content.indexOf(FALLBACK_DIRECTIVE_SUMMARY_MARKER);
+  if (
+    directiveFallbackIndex >= 0 &&
+    content.length - directiveFallbackIndex < FALLBACK_SUMMARY_WINDOW
+  ) {
     return "fallback";
   }
 
@@ -99,6 +112,7 @@ export function loadDoctorTargets(
          ) spc ON spc.summary_id = s.summary_id
          WHERE INSTR(COALESCE(s.content, ''), ?) > 0
             OR INSTR(COALESCE(s.content, ''), ?) > 0
+            OR INSTR(COALESCE(s.content, ''), ?) > 0
          ORDER BY s.conversation_id ASC, COALESCE(s.depth, 0) ASC, s.created_at ASC, s.summary_id ASC`,
       )
     : db.prepare(
@@ -121,13 +135,23 @@ export function loadDoctorTargets(
            AND (
              INSTR(COALESCE(s.content, ''), ?) > 0
              OR INSTR(COALESCE(s.content, ''), ?) > 0
+             OR INSTR(COALESCE(s.content, ''), ?) > 0
            )
          ORDER BY COALESCE(s.depth, 0) ASC, s.created_at ASC, s.summary_id ASC`,
       );
 
   const rows = (conversationId === undefined
-    ? statement.all(FALLBACK_SUMMARY_MARKER, TRUNCATED_SUMMARY_PREFIX)
-    : statement.all(conversationId, FALLBACK_SUMMARY_MARKER, TRUNCATED_SUMMARY_PREFIX)) as DoctorTargetRow[];
+    ? statement.all(
+        FALLBACK_SUMMARY_MARKER,
+        TRUNCATED_SUMMARY_PREFIX,
+        FALLBACK_DIRECTIVE_SUMMARY_MARKER,
+      )
+    : statement.all(
+        conversationId,
+        FALLBACK_SUMMARY_MARKER,
+        TRUNCATED_SUMMARY_PREFIX,
+        FALLBACK_DIRECTIVE_SUMMARY_MARKER,
+      )) as DoctorTargetRow[];
 
   const targets: DoctorTargetRecord[] = [];
   for (const row of rows) {
