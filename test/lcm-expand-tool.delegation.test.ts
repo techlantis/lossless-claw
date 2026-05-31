@@ -5,7 +5,10 @@ import {
   resetExpansionDelegationGuardForTests,
   stampDelegatedExpansionContext,
 } from "../src/tools/lcm-expansion-recursion-guard.js";
-import { runDelegatedExpansionLoop } from "../src/tools/lcm-expand-tool.delegation.js";
+import {
+  resolveRequesterConversationScopeId,
+  runDelegatedExpansionLoop,
+} from "../src/tools/lcm-expand-tool.delegation.js";
 import type { LcmDependencies } from "../src/types.js";
 
 const callGatewayMock = vi.fn();
@@ -87,6 +90,34 @@ describe("runDelegatedExpansionLoop recursion guard", () => {
     callGatewayMock.mockReset();
     resetDelegatedExpansionGrantsForTests();
     resetExpansionDelegationGuardForTests();
+  });
+
+  it("does not resolve requester scope from archived runtime-session rows", async () => {
+    const getConversationForSession = vi.fn(async () => null);
+    const getConversationBySessionId = vi.fn(async () => ({ conversationId: 42 }));
+
+    const result = await resolveRequesterConversationScopeId({
+      deps: {
+        resolveSessionIdFromSessionKey: vi.fn(async () => "archived-runtime-session"),
+      },
+      requesterSessionKey: "agent:main:main",
+      lcm: {
+        getConversationStore: () => ({
+          getConversationForSession,
+          getConversationBySessionId,
+        }),
+      } as never,
+    });
+
+    expect(result).toBeUndefined();
+    expect(getConversationForSession).toHaveBeenCalledWith({
+      sessionKey: "agent:main:main",
+    });
+    expect(getConversationForSession).toHaveBeenCalledWith({
+      sessionId: "archived-runtime-session",
+      sessionKey: "agent:main:main",
+    });
+    expect(getConversationBySessionId).not.toHaveBeenCalled();
   });
 
   it("runs delegated expansion when not in delegated context", async () => {

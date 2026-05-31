@@ -262,6 +262,13 @@ export async function resolveRequesterConversationScopeId(params: {
     if (!runtimeSessionId) {
       return undefined;
     }
+    if (typeof store.getConversationForSession === "function") {
+      const conversation = await store.getConversationForSession({
+        sessionId: runtimeSessionId,
+        sessionKey: requesterSessionKey,
+      });
+      return conversation?.conversationId;
+    }
     const conversation = await store.getConversationBySessionId(runtimeSessionId);
     return conversation?.conversationId;
   } catch {
