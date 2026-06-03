@@ -401,6 +401,11 @@ function assertContextEngineRegistrationAvailable(
   throw new Error(message);
 }
 
+/** Return true for OpenClaw's descriptor-only CLI registration pass. */
+function isCliMetadataRegistration(api: OpenClawPluginApi): boolean {
+  return (api as { registrationMode?: unknown }).registrationMode === "cli-metadata";
+}
+
 /** Resolve plugin config from direct runtime injection or the root OpenClaw config fallback. */
 function resolvePluginConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
   const directPluginConfig = toPluginConfig(api.pluginConfig);
@@ -1507,6 +1512,10 @@ const lcmPlugin = {
   },
 
   register(api: OpenClawPluginApi) {
+    if (isCliMetadataRegistration(api)) {
+      return;
+    }
+
     assertContextEngineRegistrationAvailable(api);
     const registrationConfig = resolveRegistrationConfig(api);
     const deps = createLcmDependencies(api, registrationConfig);
