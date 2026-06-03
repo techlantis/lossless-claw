@@ -133,6 +133,8 @@ type CompleteSimpleOptions = {
   maxTokens: number;
   temperature?: number;
   reasoning?: string;
+  metadata?: Record<string, unknown>;
+  onPayload?: (payload: unknown, model: unknown) => unknown | undefined | Promise<unknown | undefined>;
 };
 
 type RuntimeModelAuthResult = {
@@ -733,6 +735,45 @@ const OPENAI_CODEX_NATIVE_MODEL_IDS = new Set([
   "gpt-5.5",
   "gpt-5.5-pro",
 ]);
+const TECHLANTIS_OPENROUTER_REASONING_EXCLUDE_MODELS = new Set([
+  "google/gemini-3.5-flash",
+]);
+
+function shouldApplyTechlantisOpenRouterReasoningExclude(params: {
+  provider: string | undefined;
+  model: string | undefined;
+}): boolean {
+  return (
+    normalizeProviderId(params.provider ?? "") === "openrouter" &&
+    TECHLANTIS_OPENROUTER_REASONING_EXCLUDE_MODELS.has((params.model ?? "").trim().toLowerCase())
+  );
+}
+
+function applyTechlantisOpenRouterReasoningExclude(params: {
+  payload: unknown;
+  reasoning: string | undefined;
+}): unknown | undefined {
+  if (!isRecord(params.payload)) {
+    return undefined;
+  }
+
+  const currentReasoning = isRecord(params.payload.reasoning) ? params.payload.reasoning : {};
+  const effort =
+    typeof currentReasoning.effort === "string" && currentReasoning.effort.trim()
+      ? currentReasoning.effort.trim()
+      : typeof params.reasoning === "string" && params.reasoning.trim()
+        ? params.reasoning.trim()
+        : "low";
+
+  return {
+    ...params.payload,
+    reasoning: {
+      ...currentReasoning,
+      effort,
+      exclude: true,
+    },
+  };
+}
 
 function isOpenAICodexProvider(provider: string): boolean {
   return normalizeProviderId(provider) === OPENAI_CODEX_PROVIDER_ID;
@@ -881,6 +922,8 @@ function inferBaseUrlFromProvider(provider: string): string | undefined {
 /** Build provider-aware options for pi-ai completeSimple. */
 export function buildCompleteSimpleOptions(params: {
   api: string | undefined;
+  provider?: string;
+  model?: string;
   apiKey: string | undefined;
   maxTokens: number;
   temperature: number | undefined;
@@ -901,6 +944,24 @@ export function buildCompleteSimpleOptions(params: {
 
   if (typeof params.reasoning === "string" && params.reasoning.trim()) {
     options.reasoning = params.reasoning.trim();
+  }
+
+  if (
+    shouldApplyTechlantisOpenRouterReasoningExclude({
+      provider: params.provider,
+      model: params.model,
+    })
+  ) {
+    options.metadata = {
+      ...(options.metadata ?? {}),
+      openclaw_compaction_summary: true,
+      techlantis_reasoning_exclude: true,
+    };
+    options.onPayload = (payload) =>
+      applyTechlantisOpenRouterReasoningExclude({
+        payload,
+        reasoning: params.reasoning,
+      });
   }
 
   return options;
@@ -2036,6 +2097,19 @@ function createLcmDependencies(
           }
         }
 
+        if (
+          shouldApplyTechlantisOpenRouterReasoningExclude({
+            provider: providerId,
+            model: modelId,
+          }) &&
+          resolvedModel.reasoning !== true
+        ) {
+          resolvedModel = {
+            ...resolvedModel,
+            reasoning: true,
+          };
+        }
+
         const effectiveReasoning = resolveEffectiveReasoning({
           reasoning,
           reasoningIfSupported,
@@ -2044,6 +2118,8 @@ function createLcmDependencies(
 
         const completeOptions = buildCompleteSimpleOptions({
           api: resolvedModel.api,
+          provider: providerId,
+          model: modelId,
           apiKey: resolvedApiKey,
           maxTokens,
           temperature,

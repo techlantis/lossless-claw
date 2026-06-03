@@ -29,4 +29,54 @@ describe("buildCompleteSimpleOptions", () => {
     expect(options.temperature).toBe(0.2);
     expect(options.reasoning).toBeUndefined();
   });
+
+  it("adds Techlantis OpenRouter Gemini Flash reasoning exclude payload hints", async () => {
+    const options = buildCompleteSimpleOptions({
+      api: "openai-completions",
+      provider: "openrouter",
+      model: "google/gemini-3.5-flash",
+      apiKey: "k",
+      maxTokens: 400,
+      temperature: 0.2,
+      reasoning: "low",
+    });
+
+    expect(options.reasoning).toBe("low");
+    expect(options.metadata).toMatchObject({
+      openclaw_compaction_summary: true,
+      techlantis_reasoning_exclude: true,
+    });
+    expect(typeof options.onPayload).toBe("function");
+
+    const payload = await options.onPayload?.(
+      {
+        model: "google/gemini-3.5-flash",
+        messages: [],
+        reasoning: { effort: "low" },
+      },
+      {},
+    );
+
+    expect(payload).toMatchObject({
+      reasoning: {
+        effort: "low",
+        exclude: true,
+      },
+    });
+  });
+
+  it("does not add Techlantis payload hints to non-target models", () => {
+    const options = buildCompleteSimpleOptions({
+      api: "openai-completions",
+      provider: "openrouter",
+      model: "anthropic/claude-sonnet-4-5",
+      apiKey: "k",
+      maxTokens: 400,
+      temperature: 0.2,
+      reasoning: "low",
+    });
+
+    expect(options.metadata).toBeUndefined();
+    expect(options.onPayload).toBeUndefined();
+  });
 });
