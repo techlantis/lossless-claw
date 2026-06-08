@@ -10,6 +10,7 @@ type StartupBannerKey =
   | "stateless-session-patterns-env-override"
   | "runtime-llm-unavailable"
   | "runtime-llm-policy-summary-models"
+  | "techlantis-openrouter-gemini-flash-reasoning-exclude"
   | "state-dir";
 
 type StartupBannerLogState = {

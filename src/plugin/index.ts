@@ -32,6 +32,7 @@ const MIN_CONTEXT_ENGINE_OPENCLAW_VERSION = "2026.5.22";
 
 type ContextEngineCapableOpenClawPluginApi = OpenClawPluginApi & {
   registerContextEngine: (id: string, factory: ContextEngineFactory) => void;
+  registerTool: NonNullable<OpenClawPluginApi["registerTool"]>;
 };
 
 /** Parse `agent:<agentId>:<suffix...>` session keys. */
@@ -224,6 +225,9 @@ type SessionEndLifecycleEvent = {
 };
 
 const RUNTIME_LLM_PR_URL = "https://github.com/openclaw/openclaw/pull/64294";
+const TECHLANTIS_OPENROUTER_REASONING_EXCLUDE_MODEL_REF = "openrouter/google/gemini-3.5-flash";
+const TECHLANTIS_OPENROUTER_REASONING_EXCLUDE_EFFORT = "low";
+
 const AUTH_ERROR_TEXT_PATTERN =
   /\b401\b|unauthorized|unauthorised|invalid[_ -]?token|invalid[_ -]?api[_ -]?key|authentication failed|authorization failed|missing scope|insufficient scope|model\.request\b/i;
 const AUTH_ERROR_STATUS_KEYS = ["status", "statusCode", "status_code"] as const;
@@ -525,6 +529,122 @@ function detectProviderBridgeError(error: unknown): CompletionBridgeErrorInfo {
     ...(directCode ? { code: directCode } : {}),
     message: truncateErrorMessage(describeLogError(error)),
   };
+}
+
+function normalizeProviderModelRef(provider: string | undefined, model: string | undefined): string {
+  const providerId = provider?.trim().toLowerCase() ?? "";
+  const modelId = model?.trim().toLowerCase() ?? "";
+  return providerId && modelId ? `${providerId}/${modelId}` : "";
+}
+
+function isTechlantisOpenRouterReasoningExcludeModel(params: {
+  provider?: string;
+  model?: string;
+  modelRef?: string;
+}): boolean {
+  const modelRef = params.modelRef?.trim().toLowerCase();
+  if (modelRef === TECHLANTIS_OPENROUTER_REASONING_EXCLUDE_MODEL_REF) {
+    return true;
+  }
+  return normalizeProviderModelRef(params.provider, params.model) === TECHLANTIS_OPENROUTER_REASONING_EXCLUDE_MODEL_REF;
+}
+
+function resolveRuntimeLlmReasoningForRequest(params: {
+  provider?: string;
+  model: string;
+  modelRef?: string;
+  reasoning?: string;
+}): string | undefined {
+  const explicit = typeof params.reasoning === "string" && params.reasoning.trim()
+    ? params.reasoning.trim()
+    : undefined;
+  if (isTechlantisOpenRouterReasoningExcludeModel(params)) {
+    return explicit ?? TECHLANTIS_OPENROUTER_REASONING_EXCLUDE_EFFORT;
+  }
+  return explicit;
+}
+
+function readConfigPath(root: unknown, path: readonly string[]): unknown {
+  let current = root;
+  for (const key of path) {
+    if (!isRecord(current)) {
+      return undefined;
+    }
+    current = current[key];
+  }
+  return current;
+}
+
+function hasTechlantisOpenRouterReasoningExcludeConfig(openClawConfig: unknown): boolean {
+  const candidatePaths: readonly (readonly string[])[] = [
+    [
+      "agents",
+      "defaults",
+      "models",
+      "openrouter/google/gemini-3.5-flash",
+      "params",
+      "extra_body",
+      "reasoning",
+    ],
+    [
+      "models",
+      "openrouter/google/gemini-3.5-flash",
+      "params",
+      "extra_body",
+      "reasoning",
+    ],
+  ];
+  return candidatePaths.some((path) => {
+    const reasoning = readConfigPath(openClawConfig, path);
+    return isRecord(reasoning) && reasoning.exclude === true;
+  });
+}
+
+function isTechlantisOpenRouterReasoningExcludeConfiguredForLossless(params: {
+  config: LcmConfig;
+  openClawConfig: unknown;
+}): boolean {
+  if (isTechlantisOpenRouterReasoningExcludeModel({
+    provider: params.config.summaryProvider,
+    model: params.config.summaryModel,
+  })) {
+    return true;
+  }
+  if (isTechlantisOpenRouterReasoningExcludeModel({
+    provider: params.config.largeFileSummaryProvider,
+    model: params.config.largeFileSummaryModel,
+  })) {
+    return true;
+  }
+  if (params.config.fallbackProviders.some((fallback) =>
+    isTechlantisOpenRouterReasoningExcludeModel({
+      provider: fallback.provider,
+      model: fallback.model,
+    }),
+  )) {
+    return true;
+  }
+  return isTechlantisOpenRouterReasoningExcludeModel({
+    modelRef: readCompactionModelFromConfig(params.openClawConfig),
+  });
+}
+
+function formatTechlantisOpenRouterReasoningExcludeWarning(params: {
+  config: LcmConfig;
+  openClawConfig: unknown;
+}): string | undefined {
+  if (!isTechlantisOpenRouterReasoningExcludeConfiguredForLossless(params)) {
+    return undefined;
+  }
+  if (hasTechlantisOpenRouterReasoningExcludeConfig(params.openClawConfig)) {
+    return undefined;
+  }
+  return (
+    "[lcm] Techlantis Gemini Flash compaction safety requires host model config " +
+    "agents.defaults.models[\"openrouter/google/gemini-3.5-flash\"].params.extra_body.reasoning = { effort: \"low\", exclude: true }. " +
+    "OpenClaw 2026.6.1 rebuilds params.reasoning as { effort } for OpenAI-compatible requests, so params.reasoning.exclude is not sufficient. " +
+    "Do not use openrouter/google/gemini-3.5-flash for live compaction until that host config or an equivalent OpenClaw runtime payload policy is verified."
+  );
 }
 
 /** Read OpenClaw's configured default model from the validated runtime config. */
@@ -1125,6 +1245,18 @@ function createLcmDependencies(
     });
   }
 
+  const techlantisReasoningExcludeWarning = formatTechlantisOpenRouterReasoningExcludeWarning({
+    config,
+    openClawConfig: registrationConfig.openClawConfig,
+  });
+  if (techlantisReasoningExcludeWarning) {
+    logStartupBannerOnce({
+      key: "techlantis-openrouter-gemini-flash-reasoning-exclude",
+      log: (message) => log.warn(message),
+      message: techlantisReasoningExcludeWarning,
+    });
+  }
+
   return {
     config,
     configDiagnostics: diagnostics,
@@ -1145,13 +1277,19 @@ function createLcmDependencies(
       const providerId = provider?.trim();
       const modelId = model.trim();
       const modelRef = runtimeModelOverride?.modelRef.trim();
+      const runtimeReasoning = resolveRuntimeLlmReasoningForRequest({
+        provider: providerId,
+        model: modelId,
+        modelRef,
+        reasoning,
+      });
       const runtimeLlm = runtimeLlmComplete ?? getRuntimeLlm(api)?.complete;
       const isBoundRuntimeLlm = !!runtimeLlmComplete;
       const requestMetadata = {
         request_provider: providerId ?? "(runtime)",
         request_model: modelId || "(runtime)",
         request_api: "runtime.llm",
-        request_reasoning: reasoning?.trim() || reasoningIfSupported?.trim() || "(host-managed)",
+        request_reasoning: (runtimeReasoning ?? reasoningIfSupported?.trim()) || "(host-managed)",
         request_has_system: typeof system === "string" && system.trim().length > 0 ? "true" : "false",
         request_temperature:
           typeof temperature === "number" && Number.isFinite(temperature)
@@ -1184,7 +1322,7 @@ function createLcmDependencies(
           // agentId. Plugin-wide api.runtime.llm.complete is gateway-scoped and rejects
           // target-agent overrides unless OpenClaw is explicitly configured otherwise.
           ...(isBoundRuntimeLlm && agentId?.trim() ? { agentId: agentId.trim() } : {}),
-          ...(reasoning !== undefined ? { reasoning } : {}),
+          ...(runtimeReasoning !== undefined ? { reasoning: runtimeReasoning } : {}),
         });
         const text = typeof result.text === "string" ? result.text : "";
         return {
