@@ -199,7 +199,7 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
           defaults: {
             models: {
               "openrouter/google/gemini-3.5-flash": {
-                params: { reasoning: { effort: "low", exclude: true } },
+                params: { extra_body: { reasoning: { effort: "low", exclude: true } } },
               },
             },
           },
@@ -261,7 +261,7 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
       expect(engine).toBeDefined();
       expect(api.logger.warn).toHaveBeenCalledWith(
         expect.stringContaining(
-          'agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.reasoning.exclude = true',
+          'agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.extra_body.reasoning = { effort: "low", exclude: true }',
         ),
       );
     } finally {
@@ -283,7 +283,7 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
           defaults: {
             models: {
               "openrouter/google/gemini-3.5-flash": {
-                params: { reasoning: { effort: "low", exclude: true } },
+                params: { extra_body: { reasoning: { effort: "low", exclude: true } } },
               },
             },
           },
@@ -296,7 +296,7 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
       expect(engine).toBeDefined();
       expect(api.logger.warn).not.toHaveBeenCalledWith(
         expect.stringContaining(
-          'agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.reasoning.exclude = true',
+          'agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.extra_body.reasoning = { effort: "low", exclude: true }',
         ),
       );
     } finally {
@@ -322,7 +322,7 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
       config: {
         models: {
           "openrouter/google/gemini-3.5-flash": {
-            params: { reasoning: { effort: "low", exclude: true } },
+            params: { extra_body: { reasoning: { effort: "low", exclude: true } } },
           },
         },
       },
@@ -333,7 +333,7 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
       expect(engine).toBeDefined();
       expect(api.logger.warn).not.toHaveBeenCalledWith(
         expect.stringContaining(
-          'agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.reasoning.exclude = true',
+          'agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.extra_body.reasoning = { effort: "low", exclude: true }',
         ),
       );
     } finally {

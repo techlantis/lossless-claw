@@ -583,12 +583,14 @@ function hasTechlantisOpenRouterReasoningExcludeConfig(openClawConfig: unknown):
       "models",
       "openrouter/google/gemini-3.5-flash",
       "params",
+      "extra_body",
       "reasoning",
     ],
     [
       "models",
       "openrouter/google/gemini-3.5-flash",
       "params",
+      "extra_body",
       "reasoning",
     ],
   ];
@@ -639,8 +641,8 @@ function formatTechlantisOpenRouterReasoningExcludeWarning(params: {
   }
   return (
     "[lcm] Techlantis Gemini Flash compaction safety requires host model config " +
-    "agents.defaults.models[\"openrouter/google/gemini-3.5-flash\"].params.reasoning.exclude = true. " +
-    "Lossless will request low reasoning for this summary model, but OpenRouter reasoning.exclude is host-managed in v0.12 runtime.llm.complete. " +
+    "agents.defaults.models[\"openrouter/google/gemini-3.5-flash\"].params.extra_body.reasoning = { effort: \"low\", exclude: true }. " +
+    "OpenClaw 2026.6.1 rebuilds params.reasoning as { effort } for OpenAI-compatible requests, so params.reasoning.exclude is not sufficient. " +
     "Do not use openrouter/google/gemini-3.5-flash for live compaction until that host config or an equivalent OpenClaw runtime payload policy is verified."
   );
 }
