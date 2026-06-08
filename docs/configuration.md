@@ -215,6 +215,8 @@ the raw copied transcript.
 
 Summary calls are executed through OpenClaw's `api.runtime.llm.complete` capability. If you configure an explicit Lossless summary model (`summaryModel`, `largeFileSummaryModel`, or `fallbackProviders`), OpenClaw must allow that runtime LLM override under `plugins.entries.lossless-claw.llm.allowModelOverride` and `plugins.entries.lossless-claw.llm.allowedModels`. `openclaw doctor --fix` can add the minimal policy entries for configured Lossless summary models. Delegated expansion calls use OpenClaw's runtime sub-agent layer; explicit `expansionModel` values require `plugins.entries.lossless-claw.subagent.allowModelOverride` and a matching `subagent.allowedModels` entry, or `"*"` if you intentionally trust any expansion target. `openclaw doctor --fix` can add the minimal subagent policy, and `lcm_expand_query` retries once without the override if the host rejects it.
 
+Techlantis deployments that select `openrouter/google/gemini-3.5-flash` for Lossless compaction must also configure the host model override `agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.reasoning.exclude = true` (legacy top-level `models."openrouter/google/gemini-3.5-flash".params.reasoning.exclude = true` is also recognized). The plugin requests low reasoning for that model, but v0.12 delegates provider payload construction to OpenClaw's runtime LLM layer, so `reasoning.exclude` is host-managed rather than injected by the plugin. Lossless logs a startup warning when Gemini Flash is configured for compaction and this host override is not visible.
+
 ### Fallbacks, circuit breaking, and safety rails
 
 | Key | Type | Default | Env override | Purpose |

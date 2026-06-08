@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawPluginApi } from "../src/openclaw-bridge.js";
 import lcmPlugin from "../index.js";
 import { closeLcmConnection } from "../src/db/connection.js";
+import { resetStartupBannerLogsForTests } from "../src/startup-banner-log.js";
 import type { CompletionResult } from "../src/types.js";
 
 type RegisteredEngineFactory = (() => unknown) | undefined;
@@ -11,6 +12,8 @@ type RuntimeLlmComplete = ReturnType<typeof vi.fn>;
 
 function buildApi(params?: {
   runtimeLlmComplete?: RuntimeLlmComplete;
+  config?: Record<string, unknown>;
+  pluginConfig?: Record<string, unknown>;
 }): {
   api: OpenClawPluginApi;
   getFactory: () => RegisteredEngineFactory;
@@ -44,8 +47,17 @@ function buildApi(params?: {
     id: "lossless-claw",
     name: "Lossless Context Management",
     source: "/tmp/lossless-claw",
-    config: {},
-    pluginConfig: {
+    config: {
+      plugins: {
+        entries: {
+          "lossless-claw": {
+            config: params?.pluginConfig ?? { enabled: true, dbPath },
+          },
+        },
+      },
+      ...(params?.config ?? {}),
+    },
+    pluginConfig: params?.pluginConfig ?? {
       enabled: true,
       dbPath,
     },
@@ -113,6 +125,7 @@ function getRegisteredEngine(api: OpenClawPluginApi, getFactory: () => Registere
 describe("createLcmDependencies.complete runtime.llm bridge", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetStartupBannerLogsForTests();
   });
 
   afterEach(() => {
@@ -171,6 +184,162 @@ describe("createLcmDependencies.complete runtime.llm bridge", () => {
     }
   });
 
+
+  it("requests low reasoning for Techlantis OpenRouter Gemini Flash summary calls", async () => {
+    const runtimeLlmComplete = vi.fn(async () => ({
+      text: "summary output",
+      provider: "openrouter",
+      model: "google/gemini-3.5-flash",
+      agentId: "main",
+    }));
+    const { api, getFactory, dbPath } = buildApi({
+      runtimeLlmComplete,
+      config: {
+        agents: {
+          defaults: {
+            models: {
+              "openrouter/google/gemini-3.5-flash": {
+                params: { reasoning: { effort: "low", exclude: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    const engine = getRegisteredEngine(api, getFactory);
+
+    try {
+      const result = await engine.deps.complete({
+        provider: "openrouter",
+        model: "google/gemini-3.5-flash",
+        runtimeModelOverride: {
+          configField: "summaryModel",
+          configPath: "plugins.entries.lossless-claw.config.summaryModel",
+          modelRef: "openrouter/google/gemini-3.5-flash",
+        },
+        messages: [{ role: "user", content: "Summarize this." }],
+        maxTokens: 256,
+        reasoningIfSupported: "low",
+      });
+
+      expect(runtimeLlmComplete).toHaveBeenCalledTimes(1);
+      expect(runtimeLlmComplete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: "openrouter/google/gemini-3.5-flash",
+          reasoning: "low",
+        }),
+      );
+      expect(result).toMatchObject({
+        request_provider: "openrouter",
+        request_model: "google/gemini-3.5-flash",
+        request_reasoning: "low",
+      });
+    } finally {
+      closeLcmConnection(dbPath);
+    }
+  });
+
+  it("warns when Techlantis OpenRouter Gemini Flash reasoning exclude host config is absent", async () => {
+    const runtimeLlmComplete = vi.fn(async () => ({
+      text: "summary output",
+      provider: "openrouter",
+      model: "google/gemini-3.5-flash",
+      agentId: "main",
+    }));
+    const { api, getFactory, dbPath } = buildApi({
+      runtimeLlmComplete,
+      pluginConfig: {
+        enabled: true,
+        dbPath: "/tmp/lossless-test-warning.db",
+        summaryProvider: "openrouter",
+        summaryModel: "google/gemini-3.5-flash",
+      },
+    });
+    const engine = getRegisteredEngine(api, getFactory);
+
+    try {
+      expect(engine).toBeDefined();
+      expect(api.logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.reasoning.exclude = true',
+        ),
+      );
+    } finally {
+      closeLcmConnection(dbPath);
+    }
+  });
+
+  it("does not warn when Techlantis OpenRouter Gemini Flash is not configured for Lossless", async () => {
+    const runtimeLlmComplete = vi.fn(async () => ({
+      text: "summary output",
+      provider: "openrouter",
+      model: "google/gemini-3.5-flash",
+      agentId: "main",
+    }));
+    const { api, getFactory, dbPath } = buildApi({
+      runtimeLlmComplete,
+      config: {
+        agents: {
+          defaults: {
+            models: {
+              "openrouter/google/gemini-3.5-flash": {
+                params: { reasoning: { effort: "low", exclude: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    const engine = getRegisteredEngine(api, getFactory);
+
+    try {
+      expect(engine).toBeDefined();
+      expect(api.logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining(
+          'agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.reasoning.exclude = true',
+        ),
+      );
+    } finally {
+      closeLcmConnection(dbPath);
+    }
+  });
+
+  it("does not warn when configured Techlantis OpenRouter Gemini Flash host config has reasoning exclude", async () => {
+    const runtimeLlmComplete = vi.fn(async () => ({
+      text: "summary output",
+      provider: "openrouter",
+      model: "google/gemini-3.5-flash",
+      agentId: "main",
+    }));
+    const { api, getFactory, dbPath } = buildApi({
+      runtimeLlmComplete,
+      pluginConfig: {
+        enabled: true,
+        dbPath: "/tmp/lossless-test-present.db",
+        summaryProvider: "openrouter",
+        summaryModel: "google/gemini-3.5-flash",
+      },
+      config: {
+        models: {
+          "openrouter/google/gemini-3.5-flash": {
+            params: { reasoning: { effort: "low", exclude: true } },
+          },
+        },
+      },
+    });
+    const engine = getRegisteredEngine(api, getFactory);
+
+    try {
+      expect(engine).toBeDefined();
+      expect(api.logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining(
+          'agents.defaults.models["openrouter/google/gemini-3.5-flash"].params.reasoning.exclude = true',
+        ),
+      );
+    } finally {
+      closeLcmConnection(dbPath);
+    }
+  });
 
   it("omits agentId for plugin-wide runtime llm even when deps.complete receives one", async () => {
     const runtimeLlmComplete = vi.fn(async () => ({
